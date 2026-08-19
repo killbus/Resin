@@ -8,6 +8,16 @@ export type RequestLogItem = {
   account: string;
   target_host: string;
   target_url: string;
+  normalized_target: string;
+  authorization_decision: string;
+  egress_mode: string;
+  tls_policy_id: string;
+  tls_policy_version: number;
+  tls_configured_mode: string;
+  tls_effective_mode: string;
+  tls_bundle_fingerprint: string;
+  tls_expired: boolean;
+  failure_attribution: string;
   node_hash: string;
   node_tag: string;
   egress_ip: string;

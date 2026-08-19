@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Resinat/Resin/internal/netutil"
@@ -38,12 +39,22 @@ func normalizeOutboundTransportConfig(cfg OutboundTransportConfig) OutboundTrans
 	return cfg
 }
 
-// OutboundTransportPool manages reusable outbound HTTP transports keyed by node hash.
-// A single instance should be shared by forward/reverse proxies so keep-alive pools
-// are reused and can be evicted on node removal.
+// OutboundTransportPool manages reusable outbound HTTP transports keyed by node
+// hash and TLS verification profile. A single instance should be shared by
+// forward/reverse proxies so keep-alive pools are reused and can be evicted on
+// node removal or policy retirement.
 type OutboundTransportPool struct {
-	config     OutboundTransportConfig
-	transports *xsync.Map[node.Hash, outboundTransportEntry]
+	config           OutboundTransportConfig
+	transports       *xsync.Map[transportProfileKey, outboundTransportEntry]
+	direct           *xsync.Map[string, *http.Transport]
+	policyMu         sync.Mutex
+	policyGeneration uint64
+	policyProfiles   map[string]struct{}
+}
+
+type transportProfileKey struct {
+	node    node.Hash
+	profile string
 }
 
 type outboundTransportEntry struct {
@@ -62,8 +73,10 @@ func newOutboundTransportPoolWithConfig(cfg OutboundTransportConfig) *OutboundTr
 // NewOutboundTransportPool creates a transport pool with normalized settings.
 func NewOutboundTransportPool(cfg OutboundTransportConfig) *OutboundTransportPool {
 	return &OutboundTransportPool{
-		config:     normalizeOutboundTransportConfig(cfg),
-		transports: xsync.NewMap[node.Hash, outboundTransportEntry](),
+		config:         normalizeOutboundTransportConfig(cfg),
+		transports:     xsync.NewMap[transportProfileKey, outboundTransportEntry](),
+		direct:         xsync.NewMap[string, *http.Transport](),
+		policyProfiles: make(map[string]struct{}),
 	}
 }
 
@@ -73,30 +86,49 @@ func (p *OutboundTransportPool) Get(
 	ob adapter.Outbound,
 	sink MetricsEventSink,
 ) (*http.Transport, *ProxyError) {
-	current, cached := p.transports.Load(hash)
+	return p.GetWithProfile(hash, ob, sink, verifyTLSProfile())
+}
+
+func (p *OutboundTransportPool) GetWithProfile(hash node.Hash, ob adapter.Outbound, sink MetricsEventSink, profile tlsProfile) (*http.Transport, *ProxyError) {
+	if !p.profileCacheable(profile) {
+		transport := p.newReusableOutboundTransport(ob, sink, profile)
+		transport.DisableKeepAlives = true
+		return transport, nil
+	}
+	key := transportProfileKey{node: hash, profile: profile.key}
 	version := outboundRoutingVersion(ob)
 	// Preserve the lock-free cache hit for the common unchanged-mode path.
-	if cached && current.version >= version {
+	if current, cached := p.transports.Load(key); cached && current.version >= version {
 		if current.version != version {
 			return nil, ErrNoAvailableNodes
 		}
 		return current.transport, nil
 	}
 	var retired *http.Transport
-	entry, _ := p.transports.Compute(hash, func(current outboundTransportEntry, loaded bool) (outboundTransportEntry, xsync.ComputeOp) {
+	entry, _ := p.transports.Compute(key, func(current outboundTransportEntry, loaded bool) (outboundTransportEntry, xsync.ComputeOp) {
 		if loaded && current.version >= version {
 			return current, xsync.CancelOp
 		}
 		if loaded {
 			retired = current.transport
 		}
-		return outboundTransportEntry{version: version, transport: p.newReusableOutboundTransport(ob, sink)}, xsync.UpdateOp
+		return outboundTransportEntry{version: version, transport: p.newReusableOutboundTransport(ob, sink, profile)}, xsync.UpdateOp
 	})
 	if retired != nil {
 		retired.CloseIdleConnections()
 	}
 	if entry.version != version {
 		return nil, ErrNoAvailableNodes
+	}
+	// Publication may have retired the profile while the transport was being
+	// computed. Remove the obsolete entry so the profile is not kept alive
+	// after publication, and drain the capture without reuse.
+	if !p.profileCacheable(profile) {
+		entry.transport.DisableKeepAlives = true
+		if removed, ok := p.transports.LoadAndDelete(key); ok && removed.transport == entry.transport {
+			removed.transport.CloseIdleConnections()
+		}
+		return entry.transport, nil
 	}
 	return entry.transport, nil
 }
@@ -108,32 +140,143 @@ func outboundRoutingVersion(ob adapter.Outbound) uint64 {
 	return 0
 }
 
-// Evict closes idle connections for one node transport and removes it from pool.
-func (p *OutboundTransportPool) Evict(hash node.Hash) {
-	entry, ok := p.transports.LoadAndDelete(hash)
-	if !ok || entry.transport == nil {
+func (p *OutboundTransportPool) Direct(sink MetricsEventSink, profile tlsProfile) *http.Transport {
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
+	if !p.profileCacheable(profile) {
+		transport := newDirectHTTPTransportWithProfile(p.config, sink, profile)
+		transport.DisableKeepAlives = true
+		return transport
+	}
+	transport, _ := p.direct.LoadOrCompute(profile.key, func() (*http.Transport, bool) {
+		return newDirectHTTPTransportWithProfile(p.config, sink, profile), false
+	})
+	return transport
+}
+
+func (p *OutboundTransportPool) profileCacheable(profile tlsProfile) bool {
+	if profile.key == verifyTLSProfile().key {
+		return true
+	}
+	if p.policyGeneration == 0 {
+		return true
+	}
+	if profile.generation != p.policyGeneration {
+		return false
+	}
+	_, ok := p.policyProfiles[profile.key]
+	return ok
+}
+
+// PublishTLSProfiles is the transport-cache linearization point for a policy
+// snapshot. Acquisition uses the same mutex, so a request that captured an old
+// generation can drain with a fresh non-cached transport but can never reinsert
+// its obsolete profile after publication.
+func (p *OutboundTransportPool) PublishTLSProfiles(generation uint64, active map[string]struct{}) {
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
+	if generation < p.policyGeneration {
 		return
 	}
-	entry.transport.CloseIdleConnections()
+	p.policyGeneration = generation
+	p.policyProfiles = make(map[string]struct{}, len(active))
+	for key := range active {
+		p.policyProfiles[key] = struct{}{}
+	}
+	p.retireInactiveProfilesLocked()
+}
+
+func (p *OutboundTransportPool) retireInactiveProfilesLocked() {
+	p.transports.Range(func(key transportProfileKey, entry outboundTransportEntry) bool {
+		if key.profile == verifyTLSProfile().key {
+			return true
+		}
+		if _, active := p.policyProfiles[key.profile]; !active {
+			if removed, ok := p.transports.LoadAndDelete(key); ok && removed.transport != nil {
+				removed.transport.CloseIdleConnections()
+			}
+		}
+		return true
+	})
+	p.direct.Range(func(key string, transport *http.Transport) bool {
+		if key == verifyTLSProfile().key {
+			return true
+		}
+		if _, active := p.policyProfiles[key]; !active {
+			if removed, ok := p.direct.LoadAndDelete(key); ok && removed != nil {
+				removed.CloseIdleConnections()
+			}
+		}
+		return true
+	})
+}
+
+// Evict closes idle connections for one node transport and removes it from pool.
+func (p *OutboundTransportPool) Evict(hash node.Hash) {
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
+	p.transports.Range(func(key transportProfileKey, entry outboundTransportEntry) bool {
+		if key.node == hash {
+			if removed, ok := p.transports.LoadAndDelete(key); ok && removed.transport != nil {
+				removed.transport.CloseIdleConnections()
+			}
+		}
+		return true
+	})
+}
+
+// RetireProfile removes one obsolete policy profile from routed and direct
+// indexes and closes its idle connections. In-flight connections retain their
+// captured transport and drain naturally.
+func (p *OutboundTransportPool) RetireProfile(profileKey string) {
+	if profileKey == "" || profileKey == verifyTLSProfile().key {
+		return
+	}
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
+	delete(p.policyProfiles, profileKey)
+	p.transports.Range(func(key transportProfileKey, entry outboundTransportEntry) bool {
+		if key.profile == profileKey {
+			if removed, ok := p.transports.LoadAndDelete(key); ok && removed.transport != nil {
+				removed.transport.CloseIdleConnections()
+			}
+		}
+		return true
+	})
+	if transport, ok := p.direct.LoadAndDelete(profileKey); ok && transport != nil {
+		transport.CloseIdleConnections()
+	}
 }
 
 // CloseAll closes idle connections and clears all pooled transports.
 func (p *OutboundTransportPool) CloseAll() {
-	p.transports.Range(func(_ node.Hash, entry outboundTransportEntry) bool {
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
+	p.transports.Range(func(_ transportProfileKey, entry outboundTransportEntry) bool {
 		if entry.transport != nil {
 			entry.transport.CloseIdleConnections()
 		}
 		return true
 	})
 	p.transports.Clear()
+	p.direct.Range(func(_ string, transport *http.Transport) bool {
+		if transport != nil {
+			transport.CloseIdleConnections()
+		}
+		return true
+	})
+	p.direct.Clear()
 }
 
-func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound, sink MetricsEventSink) *http.Transport {
+func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound, sink MetricsEventSink, profile tlsProfile) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := ob.DialContext(netutil.WithoutHTTPTrace(ctx), network, M.ParseSocksaddr(addr))
 			if err != nil {
-				return nil, err
+				// Sing-box outbounds may connect to the selected node and perform
+				// target negotiation in this single call. Preserve any explicit
+				// nested evidence, but do not manufacture node causality here.
+				return nil, &OpaqueRoutedDialFailure{Err: err}
 			}
 			if sink != nil {
 				sink.OnConnectionLifecycle(ConnectionOutbound, ConnectionOpen)
@@ -141,6 +284,7 @@ func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound
 			}
 			return conn, nil
 		},
+		TLSClientConfig:     profile.tlsConfig(),
 		DisableKeepAlives:   false,
 		ForceAttemptHTTP2:   true,
 		MaxIdleConns:        p.config.MaxIdleConns,
@@ -150,6 +294,10 @@ func (p *OutboundTransportPool) newReusableOutboundTransport(ob adapter.Outbound
 }
 
 func newDirectHTTPTransport(cfg OutboundTransportConfig, sink MetricsEventSink) *http.Transport {
+	return newDirectHTTPTransportWithProfile(cfg, sink, verifyTLSProfile())
+}
+
+func newDirectHTTPTransportWithProfile(cfg OutboundTransportConfig, sink MetricsEventSink, profile tlsProfile) *http.Transport {
 	cfg = normalizeOutboundTransportConfig(cfg)
 	dialer := &net.Dialer{}
 	return &http.Transport{
@@ -164,6 +312,7 @@ func newDirectHTTPTransport(cfg OutboundTransportConfig, sink MetricsEventSink) 
 			}
 			return conn, nil
 		},
+		TLSClientConfig:     profile.tlsConfig(),
 		DisableKeepAlives:   false,
 		ForceAttemptHTTP2:   true,
 		MaxIdleConns:        cfg.MaxIdleConns,

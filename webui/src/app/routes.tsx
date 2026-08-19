@@ -12,6 +12,7 @@ import { RequestLogsPage } from "../features/requestLogs/RequestLogsPage";
 import { RulesPage } from "../features/rules/RulesPage";
 import { SubscriptionPage } from "../features/subscriptions/SubscriptionPage";
 import { SystemConfigPage } from "../features/systemConfig/SystemConfigPage";
+import { CABundlesPage } from "../features/tlsPolicy/CABundlesPage";
 
 function NodesRoute() {
   const location = useLocation();
@@ -34,6 +35,7 @@ export function AppRoutes() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/platforms" element={<PlatformPage />} />
         <Route path="/platforms/:platformId" element={<PlatformDetailPage />} />
+        <Route path="/ca-bundles" element={<CABundlesPage />} />
         <Route path="/subscriptions" element={<SubscriptionPage />} />
         <Route path="/nodes" element={<NodesRoute />} />
         <Route path="/endpoints" element={<EndpointsPage />} />

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"github.com/Resinat/Resin/internal/outbound"
+	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/routing"
 	"github.com/sagernet/sing-box/adapter"
 )
@@ -22,7 +23,24 @@ func resolveRoutedOutbound(
 	if err != nil {
 		return routedOutbound{}, mapRouteError(err)
 	}
+	return loadRoutedOutbound(pool, result)
+}
 
+func resolvePlatformRoutedOutbound(
+	router *routing.Router,
+	pool outbound.PoolAccessor,
+	platform *platform.Platform,
+	account string,
+	target string,
+) (routedOutbound, *ProxyError) {
+	result, err := router.RoutePlatformRequest(platform, account, target)
+	if err != nil {
+		return routedOutbound{}, mapRouteError(err)
+	}
+	return loadRoutedOutbound(pool, result)
+}
+
+func loadRoutedOutbound(pool outbound.PoolAccessor, result routing.RouteResult) (routedOutbound, *ProxyError) {
 	entry, ok := pool.GetEntry(result.NodeHash)
 	if !ok {
 		return routedOutbound{}, ErrNoAvailableNodes

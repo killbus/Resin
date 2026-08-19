@@ -14,6 +14,13 @@ func TestSubscriptionChainMigrationAndConstraints(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Recreate a real pre-feature version and upgrade its existing row.
+	tlsDown, err := migrationsFS.ReadFile("migrations/state/000011_platform_tls_policy.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.db.Exec(string(tlsDown)); err != nil {
+		t.Fatal(err)
+	}
 	down, err := migrationsFS.ReadFile("migrations/state/000010_subscription_chain_proxy.down.sql")
 	if err != nil {
 		t.Fatal(err)

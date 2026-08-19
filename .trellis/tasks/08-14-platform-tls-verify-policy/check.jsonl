@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Quality check entry point for backend layer."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Code standards and forbidden patterns for the diff under review."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify error handling in new validators/data plane paths follows conventions."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Review must trace one authorized request decision through persistence, API, direct/routed data plane, audit, and health feedback."}
+{"file": ".trellis/tasks/08-14-platform-tls-verify-policy/research/first-principles-audit.md", "reason": "Grounded audit baseline for checking authorization scope, direct/routed parity, failure attribution, and retained invariants."}
+{"file": ".trellis/tasks/08-14-platform-tls-verify-policy/research/granularity-decision.md", "reason": "Reopened granularity analysis; reviewers must reject implementations that assume an unapproved policy owner or target scope."}
+{"file": ".trellis/tasks/08-14-platform-tls-verify-policy/research/convergence-review.md", "reason": "Review baseline for enforcing the slim-handler, attribution, health-gate, and Phase 0 approval boundaries."}

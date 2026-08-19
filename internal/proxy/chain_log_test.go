@@ -220,7 +220,7 @@ func TestChainLogIgnoresNestedTransportAndClearsUnknownRetry(t *testing.T) {
 		inner.GotConn(httptrace.GotConnInfo{Conn: &logTestRelayConn{info: b}})
 		return nil, errors.New("nested protocol failed")
 	}}
-	transport := newOutboundTransportPool().newReusableOutboundTransport(ob, nil)
+	transport := newOutboundTransportPool().newReusableOutboundTransport(ob, nil, verifyTLSProfile())
 	_, _ = transport.DialContext(ctx, "tcp", "example.com:443")
 	l.finish()
 	if got := <-events.logCh; got.RelayNodeHash != a.Hash.Hex() {

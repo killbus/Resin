@@ -9,6 +9,11 @@ import (
 	"github.com/Resinat/Resin/internal/service"
 )
 
+type createPlatformRequest struct {
+	service.CreatePlatformRequest
+	TLSPolicy *platformConfigurationPolicyRequest `json:"tls_policy,omitempty"`
+}
+
 func platformMatchesKeyword(p service.PlatformResponse, keyword string) bool {
 	contains := func(v string) bool {
 		return strings.Contains(strings.ToLower(v), keyword)
@@ -117,12 +122,32 @@ func HandleGetPlatform(cp *service.ControlPlaneService) http.HandlerFunc {
 // HandleCreatePlatform returns a handler for POST /api/v1/platforms.
 func HandleCreatePlatform(cp *service.ControlPlaneService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req service.CreatePlatformRequest
+		var req createPlatformRequest
 		if err := DecodeBody(r, &req); err != nil {
 			writeDecodeBodyError(w, err)
 			return
 		}
-		p, err := cp.CreatePlatform(req)
+		if req.TLSPolicy != nil {
+			if req.TLSPolicy.ExpectedVersion != 0 {
+				writeInvalidArgument(w, "tls_policy.expected_version must be 0 when creating a platform")
+				return
+			}
+			mutation, err := mutationFromRequest(
+				req.TLSPolicy.Mode,
+				req.TLSPolicy.BundleID,
+				req.TLSPolicy.Reason,
+				req.TLSPolicy.ExpiresAt,
+			)
+			if err != nil {
+				writeInvalidArgument(w, err.Error())
+				return
+			}
+			req.CreatePlatformRequest.TLSPolicy = &service.PlatformConfigurationPolicyInput{
+				ExpectedVersion: 0,
+				Mutation:        mutation,
+			}
+		}
+		p, err := cp.CreatePlatformWithAudit(req.CreatePlatformRequest, tlsAuditContext(r))
 		if err != nil {
 			writeServiceError(w, err)
 			return
@@ -159,7 +184,7 @@ func HandleDeletePlatform(cp *service.ControlPlaneService) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if err := cp.DeletePlatform(id); err != nil {
+		if err := cp.DeletePlatformWithAudit(id, tlsAuditContext(r)); err != nil {
 			writeServiceError(w, err)
 			return
 		}
@@ -174,7 +199,7 @@ func HandleResetPlatform(cp *service.ControlPlaneService) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		p, err := cp.ResetPlatformToDefault(id)
+		p, err := cp.ResetPlatformToDefault(id, tlsAuditContext(r))
 		if err != nil {
 			writeServiceError(w, err)
 			return

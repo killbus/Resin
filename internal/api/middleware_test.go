@@ -11,6 +11,9 @@ import (
 
 func TestAuthMiddleware_ValidToken(t *testing.T) {
 	handler := AuthMiddleware("secret-token", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := requestCredentialClass(r); got != credentialClassSharedAdminToken {
+			t.Fatalf("credential class = %q, want %q", got, credentialClassSharedAdminToken)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -76,6 +79,9 @@ func TestAuthMiddleware_InvalidFormat(t *testing.T) {
 
 func TestAuthMiddleware_EmptyConfiguredToken_DisablesAuth(t *testing.T) {
 	handler := AuthMiddleware("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := requestCredentialClass(r); got != credentialClassAuthDisabled {
+			t.Fatalf("credential class = %q, want %q", got, credentialClassAuthDisabled)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 

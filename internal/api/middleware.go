@@ -1,9 +1,29 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 )
+
+const (
+	credentialClassSharedAdminToken = "SHARED_ADMIN_TOKEN"
+	credentialClassAuthDisabled     = "AUTH_DISABLED"
+)
+
+type credentialClassContextKey struct{}
+
+func withCredentialClass(r *http.Request, credentialClass string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), credentialClassContextKey{}, credentialClass))
+}
+
+func requestCredentialClass(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	credentialClass, _ := r.Context().Value(credentialClassContextKey{}).(string)
+	return credentialClass
+}
 
 // AuthMiddleware returns an http.Handler that validates the Bearer token
 // in the Authorization header against the expected admin token.
@@ -12,7 +32,7 @@ func AuthMiddleware(adminToken string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Empty configured admin token means auth is intentionally disabled.
 		if adminToken == "" {
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, withCredentialClass(r, credentialClassAuthDisabled))
 			return
 		}
 
@@ -34,7 +54,7 @@ func AuthMiddleware(adminToken string, next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, withCredentialClass(r, credentialClassSharedAdminToken))
 	})
 }
 
