@@ -57,29 +57,39 @@ func TestRepo_InsertListGetPayloads(t *testing.T) {
 			RespBodyTruncated:   true,
 		},
 		{
-			ID:                  "log-b",
-			StartedAtNs:         ts,
-			ProxyType:           proxy.ProxyTypeReverse,
-			ClientIP:            "10.0.0.2",
-			PlatformID:          "plat-2",
-			PlatformName:        "Platform Two",
-			Account:             "acct-b",
-			TargetHost:          "example.org",
-			TargetURL:           "https://example.org/b",
-			DurationNs:          int64(20 * time.Millisecond),
-			FirstByteDurationNs: int64(15 * time.Millisecond),
-			NetOK:               false,
-			HTTPMethod:          "POST",
-			HTTPStatus:          502,
-			ResinError:          "UPSTREAM_REQUEST_FAILED",
-			UpstreamStage:       "reverse_roundtrip",
-			UpstreamErrKind:     "connection_refused",
-			UpstreamErrno:       "ECONNREFUSED",
-			UpstreamErrMsg:      "dial tcp 203.0.113.1:443: connect: connection refused",
-			IngressBytes:        2222,
-			EgressBytes:         1111,
-			ReqBodyLen:          10,
-			RespBodyLen:         11,
+			ID:                    "log-b",
+			StartedAtNs:           ts,
+			ProxyType:             proxy.ProxyTypeReverse,
+			ClientIP:              "10.0.0.2",
+			PlatformID:            "plat-2",
+			PlatformName:          "Platform Two",
+			Account:               "acct-b",
+			TargetHost:            "example.org",
+			TargetURL:             "https://example.org/b",
+			NormalizedTarget:      "example.org:443",
+			AuthorizationDecision: "ALLOW",
+			EgressMode:            "ROUTED",
+			TLSPolicyID:           "policy-2",
+			TLSPolicyVersion:      7,
+			TLSConfiguredMode:     "BYPASS",
+			TLSEffectiveMode:      "VERIFY",
+			TLSBundleFingerprint:  "fingerprint-2",
+			TLSExpired:            true,
+			FailureAttribution:    "TargetIdentity",
+			DurationNs:            int64(20 * time.Millisecond),
+			FirstByteDurationNs:   int64(15 * time.Millisecond),
+			NetOK:                 false,
+			HTTPMethod:            "POST",
+			HTTPStatus:            502,
+			ResinError:            "UPSTREAM_REQUEST_FAILED",
+			UpstreamStage:         "reverse_roundtrip",
+			UpstreamErrKind:       "connection_refused",
+			UpstreamErrno:         "ECONNREFUSED",
+			UpstreamErrMsg:        "dial tcp 203.0.113.1:443: connect: connection refused",
+			IngressBytes:          2222,
+			EgressBytes:           1111,
+			ReqBodyLen:            10,
+			RespBodyLen:           11,
 		},
 	}
 	inserted, err := repo.InsertBatch(rows)
@@ -222,6 +232,15 @@ func TestRepo_InsertListGetPayloads(t *testing.T) {
 	}
 	if rowB.UpstreamErrMsg == "" {
 		t.Fatal("expected upstream error message")
+	}
+	if rowB.TLSPolicyID != "policy-2" || rowB.TLSPolicyVersion != 7 ||
+		rowB.TLSConfiguredMode != "BYPASS" || rowB.TLSEffectiveMode != "VERIFY" ||
+		rowB.TLSBundleFingerprint != "fingerprint-2" || !rowB.TLSExpired ||
+		rowB.FailureAttribution != "TargetIdentity" {
+		t.Fatalf("TLS policy outcome not persisted: %+v", rowB)
+	}
+	if rowB.NormalizedTarget != "example.org:443" || rowB.AuthorizationDecision != "ALLOW" || rowB.EgressMode != "ROUTED" {
+		t.Fatalf("request decision audit fields not persisted: %+v", rowB)
 	}
 
 	payload, err := repo.GetPayloads("log-a")
@@ -369,6 +388,39 @@ func TestRepo_OpenCreatesOptimizedIndexes(t *testing.T) {
 	`, "acct-a")
 }
 
+func TestRepo_OpenCopiesLegacyTLSPolicyRuleColumns(t *testing.T) {
+	logDir := t.TempDir()
+	repo := NewRepo(logDir, 1<<20, 2)
+	if err := repo.Open(); err != nil {
+		t.Fatalf("repo.Open: %v", err)
+	}
+	if _, err := repo.activeDB.Exec(`ALTER TABLE request_logs ADD COLUMN tls_policy_rule_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatalf("add legacy policy id: %v", err)
+	}
+	if _, err := repo.activeDB.Exec(`ALTER TABLE request_logs ADD COLUMN tls_policy_rule_version INTEGER NOT NULL DEFAULT 0`); err != nil {
+		t.Fatalf("add legacy policy version: %v", err)
+	}
+	if _, err := repo.activeDB.Exec(`INSERT INTO request_logs (id, ts_ns, proxy_type, tls_policy_rule_id, tls_policy_rule_version) VALUES ('legacy-policy-log', 1, 2, 'policy-legacy', 9)`); err != nil {
+		t.Fatalf("insert legacy policy log: %v", err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatalf("repo.Close: %v", err)
+	}
+
+	reopened := NewRepo(logDir, 1<<20, 2)
+	if err := reopened.Open(); err != nil {
+		t.Fatalf("reopened.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	row, err := reopened.GetByID("legacy-policy-log")
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if row == nil || row.TLSPolicyID != "policy-legacy" || row.TLSPolicyVersion != 9 {
+		t.Fatalf("legacy policy metadata not copied: %+v", row)
+	}
+}
+
 func TestRepo_OpenMigratesIndexesInHistoricalDBs(t *testing.T) {
 	logDir := t.TempDir()
 	repo := NewRepo(logDir, 1<<20, 2)
@@ -387,6 +439,23 @@ func TestRepo_OpenMigratesIndexesInHistoricalDBs(t *testing.T) {
 	`
 	if _, err := repo.activeDB.Exec(legacyIndexesDDL); err != nil {
 		t.Fatalf("prepare legacy indexes: %v", err)
+	}
+	policyColumns := []string{
+		"normalized_target",
+		"authorization_decision",
+		"egress_mode",
+		"tls_policy_id",
+		"tls_policy_version",
+		"tls_configured_mode",
+		"tls_effective_mode",
+		"tls_bundle_fingerprint",
+		"tls_expired",
+		"failure_attribution",
+	}
+	for _, column := range policyColumns {
+		if _, err := repo.activeDB.Exec("ALTER TABLE request_logs DROP COLUMN " + column); err != nil {
+			t.Fatalf("prepare legacy schema by dropping %s: %v", column, err)
+		}
 	}
 
 	time.Sleep(2 * time.Millisecond)
@@ -409,6 +478,15 @@ func TestRepo_OpenMigratesIndexesInHistoricalDBs(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = historicalDB.Close() })
 	assertRequestLogIndexes(t, historicalDB)
+	for _, column := range policyColumns {
+		exists, err := hasRequestLogColumn(historicalDB, "request_logs", column)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exists {
+			t.Fatalf("historical shard missing migrated column %s", column)
+		}
+	}
 }
 
 func TestRepo_CleanupRetainsConfiguredFileCount(t *testing.T) {

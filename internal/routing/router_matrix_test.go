@@ -40,6 +40,28 @@ type transientMissingPool struct {
 	missed atomic.Bool
 }
 
+type platformNameLookupCountingPool struct {
+	inner     PoolAccessor
+	nameCalls int
+}
+
+func (p *platformNameLookupCountingPool) GetEntry(hash node.Hash) (*node.NodeEntry, bool) {
+	return p.inner.GetEntry(hash)
+}
+
+func (p *platformNameLookupCountingPool) GetPlatform(id string) (*platform.Platform, bool) {
+	return p.inner.GetPlatform(id)
+}
+
+func (p *platformNameLookupCountingPool) GetPlatformByName(name string) (*platform.Platform, bool) {
+	p.nameCalls++
+	return p.inner.GetPlatformByName(name)
+}
+
+func (p *platformNameLookupCountingPool) RangePlatforms(fn func(*platform.Platform) bool) {
+	p.inner.RangePlatforms(fn)
+}
+
 func (p *transientMissingPool) GetEntry(hash node.Hash) (*node.NodeEntry, bool) {
 	if hash == p.target && !p.missed.Swap(true) {
 		return nil, false
@@ -122,6 +144,28 @@ func TestRouteRequest_EmptyAccount_TransientMissingEntryRetriesOnce(t *testing.T
 	}
 	if res.NodeHash != h {
 		t.Fatalf("unexpected selected node after retry: got=%s want=%s", res.NodeHash.Hex(), h.Hex())
+	}
+}
+
+func TestRoutePlatformRequestUsesCapturedPlatformWithoutNameLookup(t *testing.T) {
+	basePool := newRouterTestPool()
+	plat := platform.NewPlatform("plat-captured", "Captured", nil, nil)
+	basePool.addPlatform(plat)
+	hash, entry := newRoutableEntry(t, `{"id":"captured-platform"}`, "203.0.113.56")
+	basePool.addEntry(hash, entry)
+	basePool.rebuildPlatformView(plat)
+
+	pool := &platformNameLookupCountingPool{inner: basePool}
+	router := newTestRouter(pool, nil)
+	result, err := router.RoutePlatformRequest(plat, "", "https://example.com")
+	if err != nil {
+		t.Fatalf("route captured platform: %v", err)
+	}
+	if result.PlatformID != plat.ID || result.PlatformName != plat.Name || result.NodeHash != hash {
+		t.Fatalf("route result = %+v", result)
+	}
+	if pool.nameCalls != 0 {
+		t.Fatalf("captured platform route performed %d name lookups", pool.nameCalls)
 	}
 }
 

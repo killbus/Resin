@@ -18,7 +18,7 @@ import (
 	"github.com/Resinat/Resin/internal/state"
 )
 
-const logSummarySelectColumns = "id, ts_ns, proxy_type, client_ip, platform_id, platform_name, account, target_host, target_url, node_hash, node_tag, egress_ip, duration_ns, first_byte_duration_ns, net_ok, http_method, http_status, resin_error, upstream_stage, upstream_err_kind, upstream_errno, upstream_err_msg, ingress_bytes, egress_bytes, payload_present, req_headers_len, req_body_len, resp_headers_len, resp_body_len, req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated"
+const logSummarySelectColumns = "id, ts_ns, proxy_type, client_ip, platform_id, platform_name, account, target_host, target_url, normalized_target, authorization_decision, egress_mode, tls_policy_id, tls_policy_version, tls_configured_mode, tls_effective_mode, tls_bundle_fingerprint, tls_expired, failure_attribution, node_hash, node_tag, egress_ip, duration_ns, first_byte_duration_ns, net_ok, http_method, http_status, resin_error, upstream_stage, upstream_err_kind, upstream_errno, upstream_err_msg, ingress_bytes, egress_bytes, payload_present, req_headers_len, req_body_len, resp_headers_len, resp_body_len, req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated"
 
 // Repo manages rolling SQLite databases for request logs.
 // Each DB is named request_logs-<unix_ms>.db and lives in logDir.
@@ -116,14 +116,17 @@ func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
 	insertLog, err := tx.Prepare(`INSERT OR IGNORE INTO request_logs (
 		id, ts_ns, proxy_type, client_ip,
 		platform_id, platform_name, account,
-		target_host, target_url, node_hash, node_tag, egress_ip,
+		target_host, target_url, normalized_target, authorization_decision, egress_mode,
+		tls_policy_id, tls_policy_version, tls_configured_mode,
+		tls_effective_mode, tls_bundle_fingerprint, tls_expired, failure_attribution,
+		node_hash, node_tag, egress_ip,
 		duration_ns, first_byte_duration_ns, net_ok, http_method, http_status,
 		resin_error, upstream_stage, upstream_err_kind, upstream_errno, upstream_err_msg,
 		ingress_bytes, egress_bytes,
 		payload_present,
 		req_headers_len, req_body_len, resp_headers_len, resp_body_len,
 		req_headers_truncated, req_body_truncated, resp_headers_truncated, resp_body_truncated
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return 0, fmt.Errorf("requestlog repo prepare log: %w", err)
 	}
@@ -148,6 +151,7 @@ func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
 		if e.NetOK {
 			netOK = 1
 		}
+		tlsExpired := boolToInt(e.TLSExpired)
 		hasPayload := 0
 		if e.ReqHeaders != nil || e.ReqBody != nil || e.RespHeaders != nil || e.RespBody != nil {
 			hasPayload = 1
@@ -156,7 +160,10 @@ func (r *Repo) InsertBatch(entries []proxy.RequestLogEntry) (int, error) {
 		_, err := insertLog.Exec(
 			id, e.StartedAtNs, int(e.ProxyType), e.ClientIP,
 			e.PlatformID, e.PlatformName, e.Account,
-			e.TargetHost, e.TargetURL, e.NodeHash, e.NodeTag, e.EgressIP,
+			e.TargetHost, e.TargetURL, e.NormalizedTarget, e.AuthorizationDecision, e.EgressMode,
+			e.TLSPolicyID, e.TLSPolicyVersion, e.TLSConfiguredMode,
+			e.TLSEffectiveMode, e.TLSBundleFingerprint, tlsExpired, e.FailureAttribution,
+			e.NodeHash, e.NodeTag, e.EgressIP,
 			e.DurationNs, e.FirstByteDurationNs, netOK, e.HTTPMethod, e.HTTPStatus,
 			e.ResinError, e.UpstreamStage, e.UpstreamErrKind, e.UpstreamErrno, e.UpstreamErrMsg,
 			e.IngressBytes, e.EgressBytes,
@@ -203,30 +210,40 @@ func (r *Repo) recoverActiveDB() error {
 
 // LogSummary is the result of listing logs (without payload blobs).
 type LogSummary struct {
-	ID                  string `json:"id"`
-	TsNs                int64  `json:"ts_ns"`
-	ProxyType           int    `json:"proxy_type"`
-	ClientIP            string `json:"client_ip"`
-	PlatformID          string `json:"platform_id"`
-	PlatformName        string `json:"platform_name"`
-	Account             string `json:"account"`
-	TargetHost          string `json:"target_host"`
-	TargetURL           string `json:"target_url"`
-	NodeHash            string `json:"node_hash"`
-	NodeTag             string `json:"node_tag"`
-	EgressIP            string `json:"egress_ip"`
-	DurationNs          int64  `json:"duration_ns"`
-	FirstByteDurationNs int64  `json:"first_byte_duration_ns"`
-	NetOK               bool   `json:"net_ok"`
-	HTTPMethod          string `json:"http_method"`
-	HTTPStatus          int    `json:"http_status"`
-	ResinError          string `json:"resin_error"`
-	UpstreamStage       string `json:"upstream_stage"`
-	UpstreamErrKind     string `json:"upstream_err_kind"`
-	UpstreamErrno       string `json:"upstream_errno"`
-	UpstreamErrMsg      string `json:"upstream_err_msg"`
-	IngressBytes        int64  `json:"ingress_bytes"`
-	EgressBytes         int64  `json:"egress_bytes"`
+	ID                    string `json:"id"`
+	TsNs                  int64  `json:"ts_ns"`
+	ProxyType             int    `json:"proxy_type"`
+	ClientIP              string `json:"client_ip"`
+	PlatformID            string `json:"platform_id"`
+	PlatformName          string `json:"platform_name"`
+	Account               string `json:"account"`
+	TargetHost            string `json:"target_host"`
+	TargetURL             string `json:"target_url"`
+	NormalizedTarget      string `json:"normalized_target"`
+	AuthorizationDecision string `json:"authorization_decision"`
+	EgressMode            string `json:"egress_mode"`
+	TLSPolicyID           string `json:"tls_policy_id"`
+	TLSPolicyVersion      int64  `json:"tls_policy_version"`
+	TLSConfiguredMode     string `json:"tls_configured_mode"`
+	TLSEffectiveMode      string `json:"tls_effective_mode"`
+	TLSBundleFingerprint  string `json:"tls_bundle_fingerprint"`
+	TLSExpired            bool   `json:"tls_expired"`
+	FailureAttribution    string `json:"failure_attribution"`
+	NodeHash              string `json:"node_hash"`
+	NodeTag               string `json:"node_tag"`
+	EgressIP              string `json:"egress_ip"`
+	DurationNs            int64  `json:"duration_ns"`
+	FirstByteDurationNs   int64  `json:"first_byte_duration_ns"`
+	NetOK                 bool   `json:"net_ok"`
+	HTTPMethod            string `json:"http_method"`
+	HTTPStatus            int    `json:"http_status"`
+	ResinError            string `json:"resin_error"`
+	UpstreamStage         string `json:"upstream_stage"`
+	UpstreamErrKind       string `json:"upstream_err_kind"`
+	UpstreamErrno         string `json:"upstream_errno"`
+	UpstreamErrMsg        string `json:"upstream_err_msg"`
+	IngressBytes          int64  `json:"ingress_bytes"`
+	EgressBytes           int64  `json:"egress_bytes"`
 
 	PayloadPresent       bool `json:"payload_present"`
 	ReqHeadersLen        int  `json:"req_headers_len"`
@@ -668,11 +685,14 @@ type rowScanner interface {
 
 func scanLogSummary(s rowScanner) (LogSummary, error) {
 	var row LogSummary
-	var netOK, payloadPresent, rht, rbt, rsht, rsbt int
+	var netOK, tlsExpired, payloadPresent, rht, rbt, rsht, rsbt int
 	err := s.Scan(
 		&row.ID, &row.TsNs, &row.ProxyType, &row.ClientIP,
 		&row.PlatformID, &row.PlatformName, &row.Account,
-		&row.TargetHost, &row.TargetURL, &row.NodeHash, &row.NodeTag, &row.EgressIP,
+		&row.TargetHost, &row.TargetURL, &row.NormalizedTarget, &row.AuthorizationDecision, &row.EgressMode,
+		&row.TLSPolicyID, &row.TLSPolicyVersion, &row.TLSConfiguredMode,
+		&row.TLSEffectiveMode, &row.TLSBundleFingerprint, &tlsExpired, &row.FailureAttribution,
+		&row.NodeHash, &row.NodeTag, &row.EgressIP,
 		&row.DurationNs, &row.FirstByteDurationNs, &netOK, &row.HTTPMethod, &row.HTTPStatus,
 		&row.ResinError, &row.UpstreamStage, &row.UpstreamErrKind, &row.UpstreamErrno, &row.UpstreamErrMsg,
 		&row.IngressBytes, &row.EgressBytes,
@@ -684,6 +704,7 @@ func scanLogSummary(s rowScanner) (LogSummary, error) {
 		return LogSummary{}, err
 	}
 	row.NetOK = netOK != 0
+	row.TLSExpired = tlsExpired != 0
 	row.PayloadPresent = payloadPresent != 0
 	row.ReqHeadersTruncated = rht != 0
 	row.ReqBodyTruncated = rbt != 0

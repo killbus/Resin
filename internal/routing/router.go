@@ -82,9 +82,19 @@ func (r *Router) RouteRequest(platName, account, target string) (RouteResult, er
 	if err != nil {
 		return RouteResult{}, err
 	}
+	return r.RoutePlatformRequest(plat, account, target)
+}
 
+// RoutePlatformRequest routes with the immutable platform object already
+// captured by the request decision. It deliberately avoids a second name
+// lookup so a rename/publication cannot switch the request to another version.
+func (r *Router) RoutePlatformRequest(plat *platform.Platform, account, target string) (RouteResult, error) {
+	if plat == nil || plat.ID == "" {
+		return RouteResult{}, ErrPlatformNotFound
+	}
 	targetDomain := netutil.ExtractDomain(target)
 	state := r.ensurePlatformState(plat.ID)
+	var err error
 	var result RouteResult
 	if account == "" {
 		result, err = r.routeRandom(plat, state, targetDomain)

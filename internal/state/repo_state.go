@@ -94,55 +94,63 @@ func (r *StateRepo) SaveSystemConfig(cfg *config.RuntimeConfig, version int, upd
 
 // --- platforms ---
 
-// UpsertPlatform inserts or updates a platform by ID.
-// If the name collides with a different platform's name, ErrConflict is returned.
-func (r *StateRepo) UpsertPlatform(p model.Platform) error {
+func preparePlatformPersistence(p model.Platform) (model.Platform, string, string, error) {
 	p.Name = platform.NormalizePlatformName(p.Name)
 	if err := platform.ValidatePlatformName(p.Name); err != nil {
-		return fmt.Errorf("platform name: %w", err)
+		return model.Platform{}, "", "", fmt.Errorf("platform name: %w", err)
 	}
 
 	// Validate strongly-typed filters before persistence.
 	if _, err := platform.CompileRegexFilters(p.RegexFilters); err != nil {
-		return err
+		return model.Platform{}, "", "", err
 	}
 	if err := platform.ValidateRegionFilters(p.RegionFilters); err != nil {
-		return err
+		return model.Platform{}, "", "", err
 	}
 	missAction := platform.NormalizeReverseProxyMissAction(p.ReverseProxyMissAction)
 	if missAction == "" {
-		return fmt.Errorf("reverse_proxy_miss_action: invalid value %q", p.ReverseProxyMissAction)
+		return model.Platform{}, "", "", fmt.Errorf("reverse_proxy_miss_action: invalid value %q", p.ReverseProxyMissAction)
 	}
 	p.ReverseProxyMissAction = string(missAction)
 	if !platform.AllocationPolicy(p.AllocationPolicy).IsValid() {
-		return fmt.Errorf("allocation_policy: invalid value %q", p.AllocationPolicy)
+		return model.Platform{}, "", "", fmt.Errorf("allocation_policy: invalid value %q", p.AllocationPolicy)
 	}
 	behavior := platform.ReverseProxyEmptyAccountBehavior(strings.TrimSpace(p.ReverseProxyEmptyAccountBehavior))
 	if behavior == "" {
 		behavior = platform.ReverseProxyEmptyAccountBehaviorRandom
 	}
 	if !behavior.IsValid() {
-		return fmt.Errorf("reverse_proxy_empty_account_behavior: invalid value %q", p.ReverseProxyEmptyAccountBehavior)
+		return model.Platform{}, "", "", fmt.Errorf("reverse_proxy_empty_account_behavior: invalid value %q", p.ReverseProxyEmptyAccountBehavior)
 	}
 	p.ReverseProxyEmptyAccountBehavior = string(behavior)
 	normalizedFixedHeaders, fixedHeaders, err := platform.NormalizeFixedAccountHeaders(p.ReverseProxyFixedAccountHeader)
 	if err != nil {
-		return fmt.Errorf("reverse_proxy_fixed_account_header: %w", err)
+		return model.Platform{}, "", "", fmt.Errorf("reverse_proxy_fixed_account_header: %w", err)
 	}
 	p.ReverseProxyFixedAccountHeader = normalizedFixedHeaders
 	if behavior == platform.ReverseProxyEmptyAccountBehaviorFixedHeader && len(fixedHeaders) == 0 {
-		return fmt.Errorf(
+		return model.Platform{}, "", "", fmt.Errorf(
 			"reverse_proxy_fixed_account_header: required when reverse_proxy_empty_account_behavior is %s",
 			platform.ReverseProxyEmptyAccountBehaviorFixedHeader,
 		)
 	}
 	regexFiltersJSON, err := encodeStringSliceJSON(p.RegexFilters)
 	if err != nil {
-		return fmt.Errorf("encode platform %s regex_filters: %w", p.ID, err)
+		return model.Platform{}, "", "", fmt.Errorf("encode platform %s regex_filters: %w", p.ID, err)
 	}
 	regionFiltersJSON, err := encodeStringSliceJSON(p.RegionFilters)
 	if err != nil {
-		return fmt.Errorf("encode platform %s region_filters: %w", p.ID, err)
+		return model.Platform{}, "", "", fmt.Errorf("encode platform %s region_filters: %w", p.ID, err)
+	}
+	return p, regexFiltersJSON, regionFiltersJSON, nil
+}
+
+// UpsertPlatform inserts or updates a platform by ID.
+// If the name collides with a different platform's name, ErrConflict is returned.
+func (r *StateRepo) UpsertPlatform(p model.Platform) error {
+	p, regexFiltersJSON, regionFiltersJSON, err := preparePlatformPersistence(p)
+	if err != nil {
+		return err
 	}
 
 	r.mu.Lock()
@@ -152,8 +160,8 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 		INSERT INTO platforms (id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 		                       reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 		                       reverse_proxy_fixed_account_header, allocation_policy,
-		                       passive_circuit_breaker_disabled, updated_at_ns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                       passive_circuit_breaker_disabled, config_version, updated_at_ns)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name                     = excluded.name,
 			sticky_ttl_ns            = excluded.sticky_ttl_ns,
@@ -164,6 +172,7 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 			reverse_proxy_fixed_account_header   = excluded.reverse_proxy_fixed_account_header,
 			allocation_policy        = excluded.allocation_policy,
 			passive_circuit_breaker_disabled = excluded.passive_circuit_breaker_disabled,
+			config_version           = platforms.config_version + 1,
 			updated_at_ns            = excluded.updated_at_ns
 	`, p.ID, p.Name, p.StickyTTLNs, regexFiltersJSON, regionFiltersJSON,
 		p.ReverseProxyMissAction, p.ReverseProxyEmptyAccountBehavior, p.ReverseProxyFixedAccountHeader,
@@ -205,17 +214,25 @@ func (r *StateRepo) DeletePlatform(id string) error {
 	return nil
 }
 
+// GetPlatformIdentity returns the fields needed to rebuild a platform from
+// defaults without decoding its persisted configuration columns.
+func (r *StateRepo) GetPlatformIdentity(id string) (string, int64, error) {
+	row := r.db.QueryRow(`SELECT name, config_version FROM platforms WHERE id = ?`, id)
+	var name string
+	var configVersion int64
+	if err := row.Scan(&name, &configVersion); err != nil {
+		if err == sql.ErrNoRows {
+			return "", 0, ErrNotFound
+		}
+		return "", 0, err
+	}
+	return name, configVersion, nil
+}
+
 // GetPlatformName returns platform name by ID without decoding filter columns.
 func (r *StateRepo) GetPlatformName(id string) (string, error) {
-	row := r.db.QueryRow(`SELECT name FROM platforms WHERE id = ?`, id)
-	var name string
-	if err := row.Scan(&name); err != nil {
-		if err == sql.ErrNoRows {
-			return "", ErrNotFound
-		}
-		return "", err
-	}
-	return name, nil
+	name, _, err := r.GetPlatformIdentity(id)
+	return name, err
 }
 
 // GetPlatform returns one platform by ID.
@@ -223,7 +240,7 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	row := r.db.QueryRow(`SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json,
 			reverse_proxy_miss_action, reverse_proxy_empty_account_behavior,
 			reverse_proxy_fixed_account_header, allocation_policy,
-			passive_circuit_breaker_disabled, updated_at_ns
+			passive_circuit_breaker_disabled, config_version, updated_at_ns
 			FROM platforms WHERE id = ?`, id)
 
 	var p model.Platform
@@ -231,7 +248,8 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 	var passiveCircuitBreakerDisabled int
 	if err := row.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
 		&regionFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
-		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled, &p.UpdatedAtNs); err != nil {
+		&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
+		&p.ConfigVersion, &p.UpdatedAtNs); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
@@ -253,7 +271,7 @@ func (r *StateRepo) GetPlatform(id string) (*model.Platform, error) {
 
 // ListPlatforms returns all platforms.
 func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
-	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, updated_at_ns FROM platforms")
+	rows, err := r.db.Query("SELECT id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, config_version, updated_at_ns FROM platforms")
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +284,8 @@ func (r *StateRepo) ListPlatforms() ([]model.Platform, error) {
 		var passiveCircuitBreakerDisabled int
 		if err := rows.Scan(&p.ID, &p.Name, &p.StickyTTLNs, &regexFiltersJSON,
 			&regionFiltersJSON, &p.ReverseProxyMissAction, &p.ReverseProxyEmptyAccountBehavior,
-			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled, &p.UpdatedAtNs); err != nil {
+			&p.ReverseProxyFixedAccountHeader, &p.AllocationPolicy, &passiveCircuitBreakerDisabled,
+			&p.ConfigVersion, &p.UpdatedAtNs); err != nil {
 			return nil, err
 		}
 		p.PassiveCircuitBreakerDisabled = passiveCircuitBreakerDisabled != 0

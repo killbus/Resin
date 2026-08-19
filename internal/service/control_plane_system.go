@@ -16,6 +16,7 @@ import (
 	"github.com/Resinat/Resin/internal/proxy"
 	"github.com/Resinat/Resin/internal/routing"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/Resinat/Resin/internal/tlspolicy"
 	"github.com/Resinat/Resin/internal/topology"
 )
 
@@ -61,9 +62,13 @@ type ControlPlaneService struct {
 	RuntimeCfg      *atomic.Pointer[config.RuntimeConfig]
 	EnvCfg          *config.EnvConfig
 	EndpointRuntime EndpointRuntime
+	CABundles       *tlspolicy.CABundleRegistry
+	TLSPolicy       *tlspolicy.PolicyService
+	PublicationGate *sync.RWMutex
 
 	configMu      sync.Mutex
 	configVersion int
+	platformMu    sync.Mutex
 	endpointMu    sync.RWMutex
 }
 

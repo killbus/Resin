@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Entry point for backend layer guidelines; required reading before any Go code."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Error handling conventions for ServiceError/INVALID_ARGUMENT patterns used in validation."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SQLite migration patterns and persistence conventions to apply only after Phase 0 selects the trust-rule owner and schema."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Task spans persistence→service→proxy→webui; cross-layer consistency checklist."}
+{"file": ".trellis/tasks/08-14-platform-tls-verify-policy/research/first-principles-audit.md", "reason": "Verified current behavior, invalidated assumptions, retainable design work, and the blocking decision inventory."}
+{"file": ".trellis/tasks/08-14-platform-tls-verify-policy/research/granularity-decision.md", "reason": "Reopened granularity analysis; prevents treating per-platform or host-scoped trust as already decided."}
+{"file": ".trellis/tasks/08-14-platform-tls-verify-policy/research/convergence-review.md", "reason": "Round-two convergence decision, accepted architecture boundaries, ordered action plan, and remaining Phase 0 evidence gaps."}

@@ -19,6 +19,7 @@ import (
 	"github.com/Resinat/Resin/internal/state"
 	"github.com/Resinat/Resin/internal/subscription"
 	"github.com/Resinat/Resin/internal/testutil"
+	"github.com/Resinat/Resin/internal/tlspolicy"
 	"github.com/Resinat/Resin/internal/topology"
 	"golang.org/x/net/http/httpguts"
 )
@@ -967,7 +968,7 @@ func TestResetPlatformToDefault_SupportsBuiltInDefaultPlatform(t *testing.T) {
 		},
 	}
 
-	resp, err := cp.ResetPlatformToDefault(platform.DefaultPlatformID)
+	resp, err := cp.ResetPlatformToDefault(platform.DefaultPlatformID, tlspolicy.AuditContext{})
 	if err != nil {
 		t.Fatalf("ResetPlatformToDefault: %v", err)
 	}
@@ -1109,7 +1110,7 @@ func TestResetPlatformToDefault_DoesNotDecodeCorruptPersistedFiltersJSON(t *test
 		},
 	}
 
-	resp, err := cp.ResetPlatformToDefault(platformRow.ID)
+	resp, err := cp.ResetPlatformToDefault(platformRow.ID, tlspolicy.AuditContext{})
 	if err != nil {
 		t.Fatalf("ResetPlatformToDefault: %v", err)
 	}
@@ -1190,7 +1191,7 @@ func TestResetPlatformToDefault_InvalidPersistedPlatformNameReturnsInvalidArgume
 		},
 	}
 
-	_, err = cp.ResetPlatformToDefault(platformRow.ID)
+	_, err = cp.ResetPlatformToDefault(platformRow.ID, tlspolicy.AuditContext{})
 	if err == nil {
 		t.Fatal("expected ResetPlatformToDefault to fail for invalid persisted platform name")
 	}

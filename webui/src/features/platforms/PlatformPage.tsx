@@ -2,7 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Info, Plus, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -16,7 +16,8 @@ import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
-import { formatGoDuration, formatRelativeTime } from "../../lib/time";
+import { formatDateTime, formatGoDuration, formatRelativeTime } from "../../lib/time";
+import { PlatformTLSPolicyPanel } from "../tlsPolicy/PlatformTLSPolicyPanel";
 import { createPlatform, listPlatforms } from "./api";
 import {
   allocationPolicies,
@@ -27,17 +28,31 @@ import {
   missActions,
 } from "./constants";
 import {
-  defaultPlatformFormValues,
-  platformFormSchema,
+  describeBypassConfigurationChange,
+  isBypassConfigurationChange,
+  isTLSConfigurationSubmissionAllowed,
+  newDefaultPlatformConfigurationFormValues,
+  platformConfigurationFormSchema,
   platformNameRuleHint,
+  tlsModeLabelKey,
   toPlatformCreateInput,
-  type PlatformFormValues,
+  validateTLSConfigurationDraft,
+  type CABundleAvailability,
+  type PlatformConfigurationFormValues,
 } from "./formModel";
-import type { Platform } from "./types";
+import type { Platform, PlatformTLSPolicy } from "./types";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const EMPTY_PLATFORMS: Platform[] = [];
 const PAGE_SIZE_OPTIONS = [12, 24, 48, 96] as const;
+const CREATE_TLS_POLICY_BASELINE: PlatformTLSPolicy = {
+  platform_id: "",
+  mode: "VERIFY",
+  effective_mode: "VERIFY",
+  expired: false,
+  expires_at: null,
+  version: 0,
+};
 
 export function PlatformPage() {
   const { t } = useI18n();
@@ -46,6 +61,7 @@ export function PlatformPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(24);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [createTLSCABundleAvailability, setCreateTLSCABundleAvailability] = useState<CABundleAvailability>("unknown");
   const { toasts, showToast, dismissToast } = useToast();
 
   const queryClient = useQueryClient();
@@ -75,18 +91,21 @@ export function PlatformPage() {
   const totalPages = Math.max(1, Math.ceil(totalPlatforms / pageSize));
   const currentPage = Math.min(page, totalPages - 1);
 
-  const createForm = useForm<PlatformFormValues>({
-    resolver: zodResolver(platformFormSchema),
-    defaultValues: defaultPlatformFormValues,
+  const createForm = useForm<PlatformConfigurationFormValues>({
+    resolver: zodResolver(platformConfigurationFormSchema),
+    defaultValues: newDefaultPlatformConfigurationFormValues(),
   });
   const createEmptyAccountBehavior = createForm.watch("reverse_proxy_empty_account_behavior");
+  const createTLSMode = useWatch({ control: createForm.control, name: "tls_mode" });
+  const createTLSBundleID = useWatch({ control: createForm.control, name: "tls_bundle_id" });
 
   const createMutation = useMutation({
     mutationFn: createPlatform,
     onSuccess: async (created) => {
       await queryClient.invalidateQueries({ queryKey: ["platforms"] });
       setCreateModalOpen(false);
-      createForm.reset();
+      setCreateTLSCABundleAvailability("unknown");
+      createForm.reset(newDefaultPlatformConfigurationFormValues());
       showToast("success", t("平台 {{name}} 创建成功", { name: created.name }));
       navigate(`/platforms/${created.id}`);
     },
@@ -96,8 +115,39 @@ export function PlatformPage() {
   });
 
   const onCreateSubmit = createForm.handleSubmit(async (values) => {
+    createForm.clearErrors(["tls_bundle_id", "tls_bypass_reason", "tls_expires_at"]);
+    const validationIssue = validateTLSConfigurationDraft(
+      values,
+      CREATE_TLS_POLICY_BASELINE,
+      createTLSCABundleAvailability,
+    );
+    if (validationIssue) {
+      createForm.setError(validationIssue.field, { message: validationIssue.message }, { shouldFocus: true });
+      return;
+    }
+    if (isBypassConfigurationChange(values, CREATE_TLS_POLICY_BASELINE)) {
+      const change = describeBypassConfigurationChange(values, CREATE_TLS_POLICY_BASELINE);
+      if (!change) return;
+      const expiry = change.nextExpiresAt ? formatDateTime(change.nextExpiresAt) : t("长期有效");
+      const summary = change.kind === "enable"
+        ? `${t("证书校验方式")}: ${t(tlsModeLabelKey(change.previousMode))} -> ${t("跳过证书校验")}\n${t("有效期")}: ${expiry}`
+        : `${t("有效期")}: ${expiry}`;
+      if (!window.confirm(t("确认保存以下 HTTPS 证书校验变更？\n{{summary}}", { summary }))) return;
+    }
     await createMutation.mutateAsync(toPlatformCreateInput(values));
   });
+
+  const openCreateModal = () => {
+    setCreateTLSCABundleAvailability("unknown");
+    createForm.reset(newDefaultPlatformConfigurationFormValues());
+    setCreateModalOpen(true);
+  };
+
+  const closeCreateModal = () => {
+    setCreateModalOpen(false);
+    setCreateTLSCABundleAvailability("unknown");
+    createForm.reset(newDefaultPlatformConfigurationFormValues());
+  };
 
   const changePageSize = (next: number) => {
     setPageSize(next);
@@ -138,7 +188,7 @@ export function PlatformPage() {
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => setCreateModalOpen(true)}
+              onClick={openCreateModal}
             >
               <Plus size={16} />
               {t("新建")}
@@ -235,7 +285,7 @@ export function PlatformPage() {
           <Card className="modal-card">
             <div className="modal-header">
               <h3>{t("新建平台")}</h3>
-              <Button variant="ghost" size="sm" aria-label={t("关闭")} onClick={() => setCreateModalOpen(false)}>
+              <Button variant="ghost" size="sm" aria-label={t("关闭")} onClick={closeCreateModal}>
                 <X size={16} />
               </Button>
             </div>
@@ -371,11 +421,30 @@ export function PlatformPage() {
                 </p>
               </div>
 
+              <PlatformTLSPolicyPanel
+                platformId="new-platform"
+                policy={CREATE_TLS_POLICY_BASELINE}
+                form={createForm}
+                disabled={createMutation.isPending}
+                showStatus={false}
+                onCABundleAvailabilityChange={setCreateTLSCABundleAvailability}
+              />
+
               <div className="detail-actions">
-                <Button type="submit" disabled={createMutation.isPending}>
+                <Button
+                  type="submit"
+                  disabled={
+                    createMutation.isPending ||
+                    !isTLSConfigurationSubmissionAllowed(
+                      { tls_mode: createTLSMode, tls_bundle_id: createTLSBundleID },
+                      CREATE_TLS_POLICY_BASELINE,
+                      createTLSCABundleAvailability,
+                    )
+                  }
+                >
                   {createMutation.isPending ? t("创建中...") : t("确认创建")}
                 </Button>
-                <Button variant="secondary" onClick={() => setCreateModalOpen(false)}>
+                <Button variant="secondary" onClick={closeCreateModal}>
                   {t("取消")}
                 </Button>
               </div>

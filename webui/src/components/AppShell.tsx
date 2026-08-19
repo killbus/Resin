@@ -11,6 +11,7 @@ import {
   Rss,
   Server,
   Settings,
+  ShieldCheck,
 } from "lucide-react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -31,6 +32,7 @@ type NavItem = {
 const navItems: NavItem[] = [
   { label: "总览看板", path: "/dashboard", icon: LayoutDashboard },
   { label: "平台管理", path: "/platforms", icon: Server },
+  { label: "CA 证书", path: "/ca-bundles", icon: ShieldCheck },
   { label: "订阅管理", path: "/subscriptions", icon: Rss },
   { label: "节点池", path: "/nodes", icon: Network },
   { label: "接入点", path: "/endpoints", icon: Cable },

@@ -149,6 +149,30 @@ func (l *requestLifecycle) setTarget(host, rawURL string) {
 	l.log.TargetURL = rawURL
 }
 
+// setReverseDecision projects the non-secret, immutable policy identity into
+// the request outcome. It intentionally excludes CA PEM and BYPASS reason.
+func (l *requestLifecycle) setReverseDecision(decision ReverseRequestDecision) {
+	l.finished.PlatformID = decision.PlatformID
+	l.log.PlatformID = decision.PlatformID
+	l.log.PlatformName = decision.PlatformName
+	l.log.NormalizedTarget = decision.NormalizedTarget
+	l.log.AuthorizationDecision = decision.AuthorizationDecision
+	l.log.TLSPolicyID = decision.Policy.PolicyID
+	l.log.TLSPolicyVersion = decision.Policy.PolicyVersion
+	l.log.TLSConfiguredMode = string(decision.Policy.ConfiguredMode)
+	l.log.TLSEffectiveMode = string(decision.Policy.EffectiveMode)
+	l.log.TLSBundleFingerprint = decision.Policy.BundleFingerprint
+	l.log.TLSExpired = decision.Policy.Expired
+}
+
+func (l *requestLifecycle) setReverseEgressMode(mode string) {
+	l.log.EgressMode = mode
+}
+
+func (l *requestLifecycle) setFailureAttribution(attribution FailureAttribution) {
+	l.log.FailureAttribution = string(attribution)
+}
+
 func (l *requestLifecycle) setReqHeadersCaptured(reqHeaders []byte, totalLen int, truncated bool) {
 	l.log.ReqHeaders = reqHeaders
 	l.log.ReqHeadersLen = totalLen

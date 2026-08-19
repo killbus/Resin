@@ -328,6 +328,7 @@ a {
 
 .main {
   padding: 22px;
+  min-width: 0;
 }
 
 .security-banner {
@@ -640,6 +641,12 @@ a {
   background: rgba(175, 123, 0, 0.1);
 }
 
+.callout-info {
+  color: #164f94;
+  border-color: rgba(20, 112, 255, 0.25);
+  background: rgba(20, 112, 255, 0.08);
+}
+
 .platform-page {
   display: flex;
   flex-direction: column;
@@ -785,6 +792,187 @@ a {
   border-radius: 0;
   background: transparent;
   padding: 0;
+}
+
+.tls-policy-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.ca-toolbar-card,
+.ca-table-card {
+  padding: 16px;
+}
+
+.ca-table-card {
+  min-height: 124px;
+  min-width: 0;
+}
+
+.ca-table-card .data-table-wrap {
+  min-width: 0;
+}
+
+.ca-toolbar-actions,
+.ca-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ca-toolbar-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.ca-row-actions {
+  justify-content: flex-end;
+}
+
+.ca-table-card .data-table-ca {
+  min-width: 860px;
+}
+
+.data-table-ca th:last-child,
+.data-table-ca td:last-child {
+  width: 72px;
+  text-align: right;
+}
+
+.ca-import-modal {
+  width: min(680px, 100%);
+}
+
+.ca-import-modal .modal-header {
+  margin-bottom: 14px;
+}
+
+.ca-import-modal .modal-header p {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.tls-policy-panel {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 8px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.tls-policy-fields {
+  margin-top: 0;
+}
+
+.tls-policy-panel .platform-drawer-section-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tls-import-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tls-policy-wide {
+  grid-column: 1 / -1;
+}
+
+.tls-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tls-mono {
+  max-width: 280px;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.inline-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  color: var(--primary-strong);
+  background: transparent;
+  cursor: pointer;
+}
+
+.inline-link:hover {
+  text-decoration: underline;
+}
+
+.tls-policy-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.tls-policy-status p {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.tls-policy-reason-field {
+  gap: 8px;
+}
+
+.tls-policy-current-reason {
+  padding: 4px 0 4px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.tls-policy-current-reason span {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.tls-policy-current-reason p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tls-policy-reason-help {
+  margin: 0;
+  font-size: 12px;
+}
+
+.ca-certificate-cell {
+  display: flex;
+  min-width: 220px;
+  max-width: 360px;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ca-certificate-cell > span:first-child {
+  font-weight: 650;
+  color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 .platform-access-section {
@@ -2607,6 +2795,16 @@ a {
   margin-top: 4px;
 }
 
+.platform-config-conflict {
+  grid-column: 1 / -1;
+  align-items: center;
+}
+
+.platform-config-conflict .btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
 .platform-monitor-section {
   border-color: rgba(37, 72, 120, 0.18);
   background:
@@ -3313,6 +3511,29 @@ a {
   .endpoint-toolbar-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+
+  .ca-toolbar-card .list-card-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ca-toolbar-actions {
+    width: 100%;
+  }
+
+  .ca-toolbar-actions .btn {
+    flex: 1 1 0;
+  }
+
+  .platform-config-conflict {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .platform-config-conflict .btn {
+    margin-left: 0;
+    width: 100%;
   }
 
   .page-title {

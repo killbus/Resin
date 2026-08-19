@@ -31,6 +31,7 @@ type RequestOptions = {
   auth?: boolean;
   token?: string;
   signal?: AbortSignal;
+  headers?: Record<string, string>;
 };
 
 function buildURL(path: string): string {
@@ -55,7 +56,7 @@ async function parseErrorBody(response: Response): Promise<ApiErrorBody | null> 
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, auth = true, token, signal } = options;
-  const headers = new Headers();
+  const headers = new Headers(options.headers);
 
   if (body !== undefined) {
     headers.set("Content-Type", "application/json; charset=utf-8");

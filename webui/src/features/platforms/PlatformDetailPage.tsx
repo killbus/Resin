@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
 import { AlertTriangle, ArrowLeft, Info, RefreshCw, Search, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -17,16 +17,18 @@ import { Textarea } from "../../components/ui/Textarea";
 import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import { useI18n } from "../../i18n";
+import { ApiError } from "../../lib/api-client";
 import { formatApiErrorMessage } from "../../lib/error-message";
 import { formatDateTime, formatGoDuration, formatRelativeTime } from "../../lib/time";
+import { PlatformTLSPolicyPanel } from "../tlsPolicy/PlatformTLSPolicyPanel";
 import {
   clearAllPlatformLeases,
   deletePlatform,
   deletePlatformLease,
-  getPlatform,
+  getPlatformConfiguration,
   listPlatformLeases,
   resetPlatform,
-  updatePlatform,
+  updatePlatformConfiguration,
 } from "./api";
 import {
   allocationPolicies,
@@ -37,16 +39,22 @@ import {
   missActions,
 } from "./constants";
 import {
-  defaultPlatformFormValues,
-  platformFormSchema,
+  describeBypassConfigurationChange,
+  isBypassConfigurationChange,
+  isTLSConfigurationSubmissionAllowed,
+  tlsModeLabelKey,
+  platformConfigurationFormSchema,
+  platformConfigurationToFormValues,
   platformNameRuleHint,
-  platformToFormValues,
-  toPlatformUpdateInput,
-  type PlatformFormValues,
+  toPlatformConfigurationInput,
+  newDefaultPlatformConfigurationFormValues,
+  validateTLSConfigurationDraft,
+  type CABundleAvailability,
+  type PlatformConfigurationFormValues,
 } from "./formModel";
 import { PlatformAccessPanel } from "./PlatformAccessPanel";
 import { PlatformMonitorPanel } from "./PlatformMonitorPanel";
-import type { PlatformLease } from "./types";
+import type { PlatformConfiguration, PlatformLease } from "./types";
 
 type PlatformDetailTab = "monitor" | "access" | "config" | "ops";
 
@@ -57,7 +65,7 @@ const LEASE_PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 const DETAIL_TABS: Array<{ key: PlatformDetailTab; label: string; hint: string }> = [
   { key: "monitor", label: "监控", hint: "平台运行态趋势和快照" },
   { key: "access", label: "接入", hint: "复制正向/反向代理地址" },
-  { key: "config", label: "配置", hint: "过滤规则与分配策略" },
+  { key: "config", label: "配置", hint: "平台策略与证书校验" },
   { key: "ops", label: "运维", hint: "重置、清租约、删除操作" },
 ];
 
@@ -71,6 +79,9 @@ export function PlatformDetailPage() {
   const [leasePageSize, setLeasePageSize] = useState<number>(LEASE_PAGE_SIZE_OPTIONS[0]);
   const [leaseSearch, setLeaseSearch] = useState("");
   const [debouncedLeaseSearch, setDebouncedLeaseSearch] = useState("");
+  const [configurationBaseline, setConfigurationBaseline] = useState<PlatformConfiguration | null>(null);
+  const [configurationConflict, setConfigurationConflict] = useState(false);
+  const [tlsCABundleAvailability, setTLSCABundleAvailability] = useState<CABundleAvailability>("unknown");
   const { toasts, showToast, dismissToast } = useToast();
   const queryClient = useQueryClient();
   const formatPlatformMutationError = (error: unknown) => {
@@ -82,14 +93,13 @@ export function PlatformDetailPage() {
   };
 
   const platformQuery = useQuery({
-    queryKey: ["platform", platformId],
-    queryFn: () => getPlatform(platformId),
+    queryKey: ["platform-configuration", platformId],
+    queryFn: () => getPlatformConfiguration(platformId),
     enabled: Boolean(platformId),
     refetchInterval: 30_000,
-    placeholderData: (previous) => previous,
   });
 
-  const platform = platformQuery.data ?? null;
+  const platform = configurationBaseline?.platform ?? platformQuery.data?.platform ?? null;
 
   const leaseQuery = useQuery({
     queryKey: ["platform-leases", platform?.id, leasePage, leasePageSize, debouncedLeaseSearch],
@@ -122,20 +132,37 @@ export function PlatformDetailPage() {
   const visibleLeases = isLeasePageTransitioning ? [] : leases;
   const leaseTotalPages = Math.max(1, Math.ceil(leasesPage.total / leasePageSize));
 
-  const editForm = useForm<PlatformFormValues>({
-    resolver: zodResolver(platformFormSchema),
-    defaultValues: defaultPlatformFormValues,
+  const editForm = useForm<PlatformConfigurationFormValues>({
+    resolver: zodResolver(platformConfigurationFormSchema),
+    defaultValues: newDefaultPlatformConfigurationFormValues(),
   });
   const detailEmptyAccountBehavior = editForm.watch("reverse_proxy_empty_account_behavior");
+  const detailTLSMode = useWatch({ control: editForm.control, name: "tls_mode" });
+  const detailTLSBundleID = useWatch({ control: editForm.control, name: "tls_bundle_id" });
 
   useEffect(() => {
-    if (!platform) {
+    const configuration = platformQuery.data;
+    if (!configuration || (configurationBaseline && editForm.formState.isDirty)) {
       return;
     }
-    editForm.reset(platformToFormValues(platform));
-  }, [platform, editForm]);
+    setConfigurationBaseline(configuration);
+    editForm.reset(platformConfigurationToFormValues(configuration));
+  }, [platformQuery.data, configurationBaseline, editForm, editForm.formState.isDirty]);
 
   useEffect(() => {
+    if (!editForm.formState.isDirty) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [editForm.formState.isDirty]);
+
+  useEffect(() => {
+    setConfigurationBaseline(null);
+    setConfigurationConflict(false);
+    setTLSCABundleAvailability("unknown");
     setLeasePage(0);
     setLeaseSearch("");
     setDebouncedLeaseSearch("");
@@ -158,8 +185,10 @@ export function PlatformDetailPage() {
 
   useEffect(() => {
     const tab = new URLSearchParams(location.search).get("tab");
-    if (tab === "ops" || location.hash === `#${LEASE_MANAGEMENT_ANCHOR}`) {
+    if (location.hash === `#${LEASE_MANAGEMENT_ANCHOR}`) {
       setActiveTab("ops");
+    } else if (tab && DETAIL_TABS.some((item) => item.key === tab)) {
+      setActiveTab(tab as PlatformDetailTab);
     }
   }, [location.hash, location.search]);
 
@@ -177,23 +206,35 @@ export function PlatformDetailPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["platforms"] }),
       queryClient.invalidateQueries({ queryKey: ["platform", id] }),
+      queryClient.invalidateQueries({ queryKey: ["tls-policy", id] }),
     ]);
   };
 
   const updateMutation = useMutation({
-    mutationFn: async (formData: PlatformFormValues) => {
-      if (!platform) {
+    mutationFn: async (formData: PlatformConfigurationFormValues) => {
+      if (!configurationBaseline) {
         throw new Error("平台不存在或已被删除");
       }
-
-      return updatePlatform(platform.id, toPlatformUpdateInput(formData));
+      return updatePlatformConfiguration(
+        configurationBaseline.platform.id,
+        toPlatformConfigurationInput(formData, configurationBaseline.tls_policy),
+        configurationBaseline.config_version,
+      );
     },
     onSuccess: async (updated) => {
-      await invalidatePlatform(updated.id);
-      editForm.reset(platformToFormValues(updated));
-      showToast("success", t("平台 {{name}} 已更新", { name: updated.name }));
+      queryClient.setQueryData(["platform-configuration", updated.platform.id], updated);
+      queryClient.setQueryData(["platform", updated.platform.id], updated.platform);
+      setConfigurationBaseline(updated);
+      setConfigurationConflict(false);
+      editForm.reset(platformConfigurationToFormValues(updated));
+      await invalidatePlatform(updated.platform.id);
+      showToast("success", t("平台 {{name}} 已更新", { name: updated.platform.name }));
     },
-    onError: (error) => {
+    onError: async (error) => {
+      if (error instanceof ApiError && error.status === 409) {
+        setConfigurationConflict(true);
+        await platformQuery.refetch();
+      }
       showToast("error", formatPlatformMutationError(error));
     },
   });
@@ -207,7 +248,12 @@ export function PlatformDetailPage() {
     },
     onSuccess: async (updated) => {
       await invalidatePlatform(updated.id);
-      editForm.reset(platformToFormValues(updated));
+      const refreshed = await platformQuery.refetch();
+      if (refreshed.data) {
+        setConfigurationBaseline(refreshed.data);
+        setConfigurationConflict(false);
+        editForm.reset(platformConfigurationToFormValues(refreshed.data));
+      }
       showToast("success", t("平台 {{name}} 已重置为默认配置", { name: updated.name }));
     },
     onError: (error) => {
@@ -276,8 +322,62 @@ export function PlatformDetailPage() {
   });
 
   const onEditSubmit = editForm.handleSubmit(async (values) => {
+    if (!configurationBaseline) return;
+    editForm.clearErrors(["tls_bundle_id", "tls_bypass_reason", "tls_expires_at"]);
+    const validationIssue = validateTLSConfigurationDraft(
+      values,
+      configurationBaseline.tls_policy,
+      tlsCABundleAvailability,
+    );
+    if (validationIssue) {
+      editForm.setError(validationIssue.field, { message: validationIssue.message }, { shouldFocus: true });
+      return;
+    }
+    const bypassChanged = isBypassConfigurationChange(values, configurationBaseline.tls_policy);
+    if (bypassChanged) {
+      const change = describeBypassConfigurationChange(values, configurationBaseline.tls_policy);
+      if (!change) return;
+      const formatExpiry = (expiresAt: string | null) => (
+        expiresAt ? formatDateTime(expiresAt) : t("长期有效")
+      );
+      const summary = change.kind === "enable"
+        ? `${t("证书校验方式")}: ${t(tlsModeLabelKey(change.previousMode))} -> ${t("跳过证书校验")}\n${t("有效期")}: ${formatExpiry(change.nextExpiresAt)}`
+        : `${t("有效期")}: ${formatExpiry(change.previousExpiresAt)} -> ${formatExpiry(change.nextExpiresAt)}`;
+      if (!window.confirm(t("确认保存以下 HTTPS 证书校验变更？\n{{summary}}", { summary }))) return;
+    }
     await updateMutation.mutateAsync(values);
   });
+
+  const confirmDiscardDraft = () => {
+    if (!editForm.formState.isDirty) return true;
+    return window.confirm(t("当前配置尚未保存，确认放弃修改？"));
+  };
+
+  const discardAndReset = (configuration: PlatformConfiguration) => {
+    setConfigurationBaseline(configuration);
+    setConfigurationConflict(false);
+    editForm.reset(platformConfigurationToFormValues(configuration));
+  };
+
+  const handleRefreshPlatform = async () => {
+    if (!confirmDiscardDraft()) return;
+    const refreshed = await platformQuery.refetch();
+    if (refreshed.data) discardAndReset(refreshed.data);
+  };
+
+  const handleBack = () => {
+    if (!confirmDiscardDraft()) return;
+    navigate("/platforms");
+  };
+
+  const handleTabChange = (tab: PlatformDetailTab) => {
+    if (tab === activeTab) return;
+    if (activeTab === "config" && editForm.formState.isDirty) {
+      if (!confirmDiscardDraft()) return;
+      if (configurationBaseline) editForm.reset(platformConfigurationToFormValues(configurationBaseline));
+    }
+    setActiveTab(tab);
+  };
 
   const handleDelete = async () => {
     if (!platform) {
@@ -393,11 +493,11 @@ export function PlatformDetailPage() {
           <p className="module-description">{t("调整当前平台策略，并执行维护操作。")}</p>
         </div>
         <div className="platform-detail-toolbar">
-          <Button variant="secondary" size="sm" onClick={() => navigate("/platforms")}>
+          <Button variant="secondary" size="sm" onClick={handleBack}>
             <ArrowLeft size={16} />
             {t("返回列表")}
           </Button>
-          <Button variant="secondary" size="sm" onClick={() => platformQuery.refetch()} disabled={!platformId || platformQuery.isFetching}>
+          <Button variant="secondary" size="sm" onClick={() => void handleRefreshPlatform()} disabled={!platformId || platformQuery.isFetching}>
             <RefreshCw size={16} className={platformQuery.isFetching ? "spin" : undefined} />
             {t("刷新")}
           </Button>
@@ -489,7 +589,7 @@ export function PlatformDetailPage() {
                     aria-controls={`platform-tabpanel-${tab.key}`}
                     className={`platform-detail-tab ${selected ? "platform-detail-tab-active" : ""}`}
                     title={t(tab.hint)}
-                    onClick={() => setActiveTab(tab.key)}
+                    onClick={() => handleTabChange(tab.key)}
                   >
                     <span>{t(tab.label)}</span>
                   </button>
@@ -528,7 +628,7 @@ export function PlatformDetailPage() {
               >
                 <div className="platform-drawer-section-head">
                   <h4>{t("平台配置")}</h4>
-                  <p>{t("修改过滤策略与路由策略后点击保存。")}</p>
+                  <p>{t("修改平台策略与 HTTPS 证书校验后统一保存。")}</p>
                 </div>
 
                 <form className="form-grid platform-config-form" onSubmit={onEditSubmit}>
@@ -667,8 +767,47 @@ export function PlatformDetailPage() {
                     </p>
                   </div>
 
+                  {configurationBaseline ? (
+                    <PlatformTLSPolicyPanel
+                      platformId={platform.id}
+                      policy={configurationBaseline.tls_policy}
+                      form={editForm}
+                      disabled={updateMutation.isPending}
+                      onCABundleAvailabilityChange={setTLSCABundleAvailability}
+                    />
+                  ) : null}
+
+                  {configurationConflict ? (
+                    <div className="callout callout-warning platform-config-conflict" role="alert">
+                      <AlertTriangle size={15} />
+                      <span>{t("配置已在其他位置更新。你的修改仍保留，请载入最新配置后重新编辑。")}</span>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          if (platformQuery.data && confirmDiscardDraft()) discardAndReset(platformQuery.data);
+                        }}
+                      >
+                        {t("载入最新配置")}
+                      </Button>
+                    </div>
+                  ) : null}
+
                   <div className="platform-config-actions">
-                    <Button type="submit" disabled={updateMutation.isPending}>
+                    <Button
+                      type="submit"
+                      disabled={
+                        updateMutation.isPending ||
+                        configurationConflict ||
+                        !configurationBaseline ||
+                        !isTLSConfigurationSubmissionAllowed(
+                          { tls_mode: detailTLSMode, tls_bundle_id: detailTLSBundleID },
+                          configurationBaseline.tls_policy,
+                          tlsCABundleAvailability,
+                        ) ||
+                        !editForm.formState.isDirty
+                      }
+                    >
                       {updateMutation.isPending ? t("保存中...") : t("保存配置")}
                     </Button>
                   </div>
@@ -693,7 +832,7 @@ export function PlatformDetailPage() {
                     <div className="platform-op-item">
                       <div className="platform-op-copy">
                         <h5>{t("重置为默认配置")}</h5>
-                        <p className="platform-op-hint">{t("恢复默认设置，并覆盖当前修改。")}</p>
+                        <p className="platform-op-hint">{t("恢复平台的所有默认设置，包括 HTTPS 证书校验。")}</p>
                       </div>
                       <Button variant="secondary" onClick={() => void resetMutation.mutateAsync()} disabled={resetMutation.isPending}>
                         {resetMutation.isPending ? t("重置中...") : t("重置为默认配置")}
