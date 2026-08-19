@@ -1,5 +1,13 @@
 # Research - trust-policy granularity decision
 
+> **Superseded decision record (2026-08-19):** The exact-target model below was
+> an intermediate assistant recommendation and is not the implemented product
+> contract. Repository evidence subsequently established Platform as Resin's
+> existing whole-request configuration boundary, with one optional TLS policy
+> per custom Platform. See [`assumption-correction.md`](./assumption-correction.md),
+> [`../prd.md`](../prd.md), and [`../design.md`](../design.md). The remainder is
+> retained only as design-history context.
+
 Status: **target matcher and persistence owner resolved**.
 
 ## Question

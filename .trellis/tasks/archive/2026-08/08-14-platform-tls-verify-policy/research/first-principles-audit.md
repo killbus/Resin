@@ -1,5 +1,13 @@
 # First-principles audit - reverse HTTPS target trust
 
+> **Superseded scope decision (2026-08-19):** This document preserves an
+> intermediate review. Its exact-target conclusions were later withdrawn after
+> repository-grounded product and UI review established one optional
+> platform-wide TLS policy per custom Platform. Treat the evidence below as
+> historical input, not the final product contract. See
+> [`assumption-correction.md`](./assumption-correction.md), [`../prd.md`](../prd.md),
+> and [`../design.md`](../design.md) for the authoritative decision.
+
 Status: grounded review completed on 2026-08-18; target scope and modes are now
 resolved, with implementation contracts still open.
 
