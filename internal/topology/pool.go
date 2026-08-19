@@ -214,17 +214,43 @@ func (p *GlobalNodePool) UnregisterPlatform(id string) {
 // instance, this method rebuilds its routable view, then swaps map pointers
 // under platMu in one critical section.
 func (p *GlobalNodePool) ReplacePlatform(next *platform.Platform) error {
+	if err := p.PreparePlatformReplacement(next); err != nil {
+		return err
+	}
+	p.PublishPreparedPlatform(next)
+	return nil
+}
+
+// PreparePlatformRegistration builds a new Platform's routable view and checks
+// registry invariants without publishing it. After this succeeds, callers may
+// persist the Platform and use PublishPreparedPlatform as an infallible swap.
+func (p *GlobalNodePool) PreparePlatformRegistration(next *platform.Platform) error {
 	if next == nil || next.ID == "" {
 		return ErrPlatformNotRegistered
 	}
-
-	// Build the new platform's view before publish so readers never observe
-	// an empty, not-yet-built view due only to replacement.
 	p.RebuildPlatform(next)
+	p.platMu.RLock()
+	defer p.platMu.RUnlock()
+	if _, exists := p.platformByID[next.ID]; exists {
+		return ErrPlatformNameConflict
+	}
+	if next.Name != "" {
+		if _, exists := p.platformByName[next.Name]; exists {
+			return ErrPlatformNameConflict
+		}
+	}
+	return nil
+}
 
+// PreparePlatformReplacement builds the candidate routable view and validates
+// the registry invariants without publishing it.
+func (p *GlobalNodePool) PreparePlatformReplacement(next *platform.Platform) error {
+	if next == nil || next.ID == "" {
+		return ErrPlatformNotRegistered
+	}
+	p.RebuildPlatform(next)
 	p.platMu.Lock()
 	defer p.platMu.Unlock()
-
 	current, ok := p.platformByID[next.ID]
 	if !ok {
 		return ErrPlatformNotRegistered
@@ -235,10 +261,21 @@ func (p *GlobalNodePool) ReplacePlatform(next *platform.Platform) error {
 			return ErrPlatformNameConflict
 		}
 	}
+	return nil
+}
 
+// PublishPreparedPlatform rebuilds the candidate view while holding the
+// registry write lock, then performs the pointer/index replacement. Holding
+// the lock across the final rebuild prevents node dirty notifications from
+// observing the candidate before it is installed, while ensuring notifications
+// that race with publication are replayed against the newly registered view.
+func (p *GlobalNodePool) PublishPreparedPlatform(next *platform.Platform) {
+	p.platMu.Lock()
+	defer p.platMu.Unlock()
+	p.RebuildPlatform(next)
+	current := p.platformByID[next.ID]
 	p.platformByID[next.ID] = next
-
-	if current.Name != "" {
+	if current != nil && current.Name != "" {
 		if mapped, exists := p.platformByName[current.Name]; exists && mapped == current {
 			delete(p.platformByName, current.Name)
 		}
@@ -246,8 +283,6 @@ func (p *GlobalNodePool) ReplacePlatform(next *platform.Platform) error {
 	if next.Name != "" {
 		p.platformByName[next.Name] = next
 	}
-
-	return nil
 }
 
 // GetPlatform retrieves a platform by ID.

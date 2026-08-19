@@ -1017,16 +1017,18 @@ func TestReverseProxy_AccountRejection_EmptyPlatform(t *testing.T) {
 		ReverseProxyEmptyAccountBehavior: string(platform.ReverseProxyEmptyAccountBehaviorAccountHeaderRule),
 	}
 
-	rp := &ReverseProxy{
-		token: "tok",
-		platLook: &mockPlatformLookup{
-			platforms: map[string]*platform.Platform{
-				platform.DefaultPlatformID: defaultPlat,
-			},
+	lookup := &mockPlatformLookup{
+		platforms: map[string]*platform.Platform{
+			platform.DefaultPlatformID: defaultPlat,
 		},
-		matcher: BuildAccountMatcher(nil),
-		events:  NoOpEventEmitter{},
 	}
+	rp := NewReverseProxy(ReverseProxyConfig{
+		ProxyToken:         "tok",
+		PlatformLookup:     lookup,
+		Matcher:            BuildAccountMatcher(nil),
+		Events:             NoOpEventEmitter{},
+		TLSPolicyEvaluator: strictVerifyEvaluator{},
+	})
 
 	// Path: /tok/:/https/example.com/path — empty platform, no account.
 	req := httptest.NewRequest("GET", "/tok/:/https/example.com/path", nil)

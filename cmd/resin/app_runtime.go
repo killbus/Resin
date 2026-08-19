@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/Resinat/Resin/internal/routing"
 	"github.com/Resinat/Resin/internal/service"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/Resinat/Resin/internal/tlspolicy"
 	"github.com/joho/godotenv"
 )
 
@@ -371,17 +373,28 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 		StartedAt: startedAt,
 	}
 
+	caBundles := tlspolicy.NewCABundleRegistry(engine, time.Now)
+	tlsPolicies, err := tlspolicy.NewPolicyService(engine, caBundles, time.Now)
+	if err != nil {
+		return fmt.Errorf("load TLS policy: %w", err)
+	}
+	tlsEvaluator := tlspolicy.NewEvaluator(tlsPolicies, time.Now)
+	publicationGate := &sync.RWMutex{}
+
 	cpService := &service.ControlPlaneService{
-		RuntimeCfg:     a.runtimeCfg,
-		EnvCfg:         a.envCfg,
-		Engine:         engine,
-		Pool:           a.topoRuntime.pool,
-		SubMgr:         a.topoRuntime.subManager,
-		Scheduler:      a.topoRuntime.scheduler,
-		Router:         a.topoRuntime.router,
-		ProbeMgr:       a.topoRuntime.probeMgr,
-		GeoIP:          a.geoSvc,
-		MatcherRuntime: a.accountMatcher,
+		RuntimeCfg:      a.runtimeCfg,
+		EnvCfg:          a.envCfg,
+		Engine:          engine,
+		Pool:            a.topoRuntime.pool,
+		SubMgr:          a.topoRuntime.subManager,
+		Scheduler:       a.topoRuntime.scheduler,
+		Router:          a.topoRuntime.router,
+		ProbeMgr:        a.topoRuntime.probeMgr,
+		GeoIP:           a.geoSvc,
+		MatcherRuntime:  a.accountMatcher,
+		CABundles:       caBundles,
+		TLSPolicy:       tlsPolicies,
+		PublicationGate: publicationGate,
 	}
 
 	apiSrv := api.NewServerWithAddress(
@@ -411,6 +424,11 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	if a.transportPool == nil {
 		a.transportPool = proxy.NewOutboundTransportPool(outboundTransportCfg)
 	}
+	tlsPolicies.AddSnapshotListener(func(_old, next *tlspolicy.Snapshot) {
+		a.transportPool.PublishTLSProfiles(next.Generation, next.ProfileKeys())
+	})
+	initialTLSSnapshot := tlsPolicies.Snapshot()
+	a.transportPool.PublishTLSProfiles(initialTLSSnapshot.Generation, initialTLSSnapshot.ProfileKeys())
 
 	forwardProxy := proxy.NewForwardProxy(proxy.ForwardProxyConfig{
 		ProxyToken:        a.envCfg.ProxyToken,
@@ -425,17 +443,19 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	})
 
 	reverseProxy := proxy.NewReverseProxy(proxy.ReverseProxyConfig{
-		ProxyToken:        a.envCfg.ProxyToken,
-		Router:            a.topoRuntime.router,
-		Pool:              a.topoRuntime.pool,
-		PlatformLookup:    a.topoRuntime.pool,
-		Health:            a.topoRuntime.pool,
-		Matcher:           a.accountMatcher,
-		Events:            proxyEvents,
-		MetricsSink:       a.metricsManager,
-		OutboundTransport: outboundTransportCfg,
-		TransportPool:     a.transportPool,
-		ProxyBypassRules:  a.envCfg.ProxyBypassRules,
+		ProxyToken:         a.envCfg.ProxyToken,
+		Router:             a.topoRuntime.router,
+		Pool:               a.topoRuntime.pool,
+		PlatformLookup:     a.topoRuntime.pool,
+		Health:             a.topoRuntime.pool,
+		Matcher:            a.accountMatcher,
+		Events:             proxyEvents,
+		MetricsSink:        a.metricsManager,
+		OutboundTransport:  outboundTransportCfg,
+		TransportPool:      a.transportPool,
+		ProxyBypassRules:   a.envCfg.ProxyBypassRules,
+		TLSPolicyEvaluator: tlsEvaluator,
+		PublicationGate:    publicationGate,
 	})
 	socks5Inbound := proxy.NewSocks5Inbound(proxy.Socks5InboundConfig{
 		ProxyToken:       a.envCfg.ProxyToken,

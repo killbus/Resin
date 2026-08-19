@@ -34,6 +34,7 @@ export type PlatformCreateInput = {
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
+  tls_policy?: PlatformTLSConfigurationInput;
 };
 
 export type PlatformUpdateInput = {
@@ -46,6 +47,35 @@ export type PlatformUpdateInput = {
   reverse_proxy_fixed_account_header?: string;
   allocation_policy?: PlatformAllocationPolicy;
   passive_circuit_breaker_disabled?: boolean;
+};
+
+export type PlatformTLSPolicy = {
+  platform_id: string;
+  mode: "VERIFY" | "TRUST_CUSTOM_CA" | "BYPASS";
+  effective_mode: "VERIFY" | "TRUST_CUSTOM_CA" | "BYPASS";
+  expired: boolean;
+  bundle_id?: string;
+  bundle_fingerprint?: string;
+  reason?: string;
+  expires_at: string | null;
+  version: number;
+  updated_at?: string;
+};
+
+export type PlatformConfiguration = {
+  platform: Platform;
+  tls_policy: PlatformTLSPolicy;
+  config_version: number;
+};
+
+export type PlatformTLSConfigurationInput =
+  | { mode: "VERIFY"; expected_version: number }
+  | { mode: "TRUST_CUSTOM_CA"; expected_version: number; bundle_id: string }
+  | { mode: "BYPASS"; expected_version: number; reason?: string; expires_at: string | null };
+
+export type PlatformConfigurationInput = {
+  platform: PlatformUpdateInput;
+  tls_policy?: PlatformTLSConfigurationInput;
 };
 
 export type PlatformLease = {

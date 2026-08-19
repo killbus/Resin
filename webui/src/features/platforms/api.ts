@@ -3,6 +3,8 @@ import type {
   ListPlatformLeasesInput,
   PageResponse,
   Platform,
+  PlatformConfiguration,
+  PlatformConfigurationInput,
   PlatformCreateInput,
   PlatformLease,
   PlatformUpdateInput,
@@ -100,6 +102,41 @@ export async function listPlatforms(input: ListPlatformsPageInput = {}): Promise
 export async function getPlatform(id: string): Promise<Platform> {
   const data = await apiRequest<ApiPlatform>(`${basePath}/${id}`);
   return normalizePlatform(data);
+}
+
+type ApiPlatformConfiguration = Omit<PlatformConfiguration, "platform"> & {
+  platform: ApiPlatform;
+};
+
+function normalizePlatformConfiguration(raw: ApiPlatformConfiguration): PlatformConfiguration {
+  const policy = raw.tls_policy;
+  return {
+    ...raw,
+    platform: normalizePlatform(raw.platform),
+    tls_policy: {
+      ...policy,
+      effective_mode: policy.effective_mode ?? policy.mode,
+      expired: policy.expired === true,
+    },
+  };
+}
+
+export async function getPlatformConfiguration(id: string): Promise<PlatformConfiguration> {
+  const data = await apiRequest<ApiPlatformConfiguration>(`${basePath}/${id}/configuration`);
+  return normalizePlatformConfiguration(data);
+}
+
+export async function updatePlatformConfiguration(
+  id: string,
+  input: PlatformConfigurationInput,
+  configVersion: number,
+): Promise<PlatformConfiguration> {
+  const data = await apiRequest<ApiPlatformConfiguration>(`${basePath}/${id}/configuration`, {
+    method: "PUT",
+    body: input,
+    headers: { "If-Match": `"${configVersion}"` },
+  });
+  return normalizePlatformConfiguration(data);
 }
 
 export async function createPlatform(input: PlatformCreateInput): Promise<Platform> {

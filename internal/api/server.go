@@ -82,8 +82,23 @@ func NewServerWithAddress(
 		authed.Handle("GET /api/v1/platforms/{id}", HandleGetPlatform(cp))
 		authed.Handle("PATCH /api/v1/platforms/{id}", HandleUpdatePlatform(cp))
 		authed.Handle("DELETE /api/v1/platforms/{id}", HandleDeletePlatform(cp))
+		authed.Handle("GET /api/v1/platforms/{id}/configuration", HandleGetPlatformConfiguration(cp))
+		authed.Handle("PUT /api/v1/platforms/{id}/configuration", HandlePutPlatformConfiguration(cp))
 		authed.Handle("POST /api/v1/platforms/{id}/actions/reset-to-default", HandleResetPlatform(cp))
 		authed.Handle("POST /api/v1/platforms/{id}/actions/rebuild-routable-view", HandleRebuildPlatform(cp))
+
+		// Immutable CA bundle registry. Importing material never binds policy.
+		authed.Handle("GET /api/v1/ca-bundles", HandleListCABundles(cp))
+		authed.Handle("POST /api/v1/ca-bundles", HandleImportCABundle(cp))
+		authed.Handle("GET /api/v1/ca-bundles/{bundle_id}", HandleGetCABundle(cp))
+		authed.Handle("DELETE /api/v1/ca-bundles/{bundle_id}", HandleDeleteCABundle(cp))
+		authed.Handle("GET /api/v1/ca-bundles/{bundle_id}/history", HandleCABundleHistory(cp))
+
+		// One optional reverse HTTPS verification policy per custom platform.
+		authed.Handle("GET /api/v1/platforms/{id}/tls-policy", HandleGetTLSPolicy(cp))
+		authed.Handle("PUT /api/v1/platforms/{id}/tls-policy", HandlePutTLSPolicy(cp))
+		authed.Handle("DELETE /api/v1/platforms/{id}/tls-policy", HandleDeleteTLSPolicy(cp))
+		authed.Handle("GET /api/v1/platforms/{id}/tls-policy/history", HandleTLSPolicyHistory(cp))
 
 		// Endpoints.
 		authed.Handle("GET /api/v1/endpoints", HandleListEndpoints(cp))

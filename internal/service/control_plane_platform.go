@@ -13,6 +13,7 @@ import (
 	"github.com/Resinat/Resin/internal/node"
 	"github.com/Resinat/Resin/internal/platform"
 	"github.com/Resinat/Resin/internal/state"
+	"github.com/Resinat/Resin/internal/tlspolicy"
 )
 
 // ------------------------------------------------------------------
@@ -325,19 +326,29 @@ func (s *ControlPlaneService) GetPlatform(id string) (*PlatformResponse, error) 
 
 // CreatePlatformRequest holds create platform parameters.
 type CreatePlatformRequest struct {
-	Name                             *string  `json:"name"`
-	StickyTTL                        *string  `json:"sticky_ttl"`
-	RegexFilters                     []string `json:"regex_filters"`
-	RegionFilters                    []string `json:"region_filters"`
-	ReverseProxyMissAction           *string  `json:"reverse_proxy_miss_action"`
-	ReverseProxyEmptyAccountBehavior *string  `json:"reverse_proxy_empty_account_behavior"`
-	ReverseProxyFixedAccountHeader   *string  `json:"reverse_proxy_fixed_account_header"`
-	AllocationPolicy                 *string  `json:"allocation_policy"`
-	PassiveCircuitBreakerDisabled    *bool    `json:"passive_circuit_breaker_disabled"`
+	Name                             *string                           `json:"name"`
+	StickyTTL                        *string                           `json:"sticky_ttl"`
+	RegexFilters                     []string                          `json:"regex_filters"`
+	RegionFilters                    []string                          `json:"region_filters"`
+	ReverseProxyMissAction           *string                           `json:"reverse_proxy_miss_action"`
+	ReverseProxyEmptyAccountBehavior *string                           `json:"reverse_proxy_empty_account_behavior"`
+	ReverseProxyFixedAccountHeader   *string                           `json:"reverse_proxy_fixed_account_header"`
+	AllocationPolicy                 *string                           `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    *bool                             `json:"passive_circuit_breaker_disabled"`
+	TLSPolicy                        *PlatformConfigurationPolicyInput `json:"-"`
 }
 
 // CreatePlatform creates a new platform.
 func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*PlatformResponse, error) {
+	return s.CreatePlatformWithAudit(req, tlspolicy.AuditContext{})
+}
+
+// CreatePlatformWithAudit creates a Platform and its optional TLS policy as one
+// persisted and published configuration.
+func (s *ControlPlaneService) CreatePlatformWithAudit(req CreatePlatformRequest, audit tlspolicy.AuditContext) (*PlatformResponse, error) {
+	s.platformMu.Lock()
+	defer s.platformMu.Unlock()
+
 	// Validate name.
 	if req.Name == nil {
 		return nil, invalidArg("name is required")
@@ -396,6 +407,64 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 	}
 
 	id := uuid.New().String()
+	if s.TLSPolicy != nil {
+		if s.Engine == nil || s.Pool == nil {
+			return nil, internal("platform configuration service unavailable", nil)
+		}
+		if req.TLSPolicy != nil && req.TLSPolicy.ExpectedVersion != 0 {
+			return nil, invalidArg("tls_policy.expected_version must be 0 when creating a platform")
+		}
+		runtimePlatform, err := cfg.toRuntime(id)
+		if err != nil {
+			return nil, invalidArg(err.Error())
+		}
+		if err := s.Pool.PreparePlatformRegistration(runtimePlatform); err != nil {
+			return nil, conflict("platform runtime cannot be registered")
+		}
+		platformRow := cfg.toModel(id, time.Now().UTC().UnixNano())
+		var desired *tlspolicy.Mutation
+		if req.TLSPolicy != nil {
+			mutation := req.TLSPolicy.Mutation
+			desired = &mutation
+		}
+		policy, applyErr := s.TLSPolicy.ApplyConfiguration(
+			id,
+			cfg.Name,
+			desired,
+			0,
+			audit,
+			func(plan tlspolicy.ConfigurationMutation) error {
+				return s.Engine.CreatePlatformConfiguration(platformRow, plan)
+			},
+			func(publishTLS func()) {
+				s.withPublicationWriteLock(func() {
+					s.Pool.PublishPreparedPlatform(runtimePlatform)
+					publishTLS()
+				})
+			},
+		)
+		if applyErr != nil {
+			switch {
+			case errors.Is(applyErr, state.ErrConflict), errors.Is(applyErr, tlspolicy.ErrConflict):
+				return nil, conflict("platform name or TLS policy version conflict")
+			case errors.Is(applyErr, tlspolicy.ErrNotFound):
+				return nil, notFound("CA bundle not found")
+			case errors.Is(applyErr, tlspolicy.ErrIntegrity):
+				return nil, internal("create platform TLS policy", applyErr)
+			case errors.Is(applyErr, tlspolicy.ErrPersistence):
+				return nil, internal("create platform TLS policy", applyErr)
+			default:
+				return nil, invalidArg(applyErr.Error())
+			}
+		}
+		platformRow.ConfigVersion = 1
+		policy.PlatformName = cfg.Name
+		r := s.withRoutableNodeCount(platformToResponse(platformRow))
+		return &r, nil
+	}
+	if req.TLSPolicy != nil {
+		return nil, internal("platform TLS policy service unavailable", nil)
+	}
 	mp, plat, svcErr := s.compileAndUpsertPlatform(id, cfg)
 	if svcErr != nil {
 		return nil, svcErr
@@ -415,6 +484,9 @@ func (s *ControlPlaneService) CreatePlatform(req CreatePlatformRequest) (*Platfo
 // This is not RFC 7396 JSON Merge Patch: patch must be a non-empty object and
 // null values are rejected.
 func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessage) (*PlatformResponse, error) {
+	s.platformMu.Lock()
+	defer s.platformMu.Unlock()
+
 	patch, verr := parseMergePatch(patchJSON)
 	if verr != nil {
 		return nil, verr
@@ -528,23 +600,49 @@ func (s *ControlPlaneService) UpdatePlatform(id string, patchJSON json.RawMessag
 
 // DeletePlatform deletes a platform.
 func (s *ControlPlaneService) DeletePlatform(id string) error {
+	return s.DeletePlatformWithAudit(id, tlspolicy.AuditContext{})
+}
+
+func (s *ControlPlaneService) DeletePlatformWithAudit(id string, audit tlspolicy.AuditContext) error {
+	s.platformMu.Lock()
+	defer s.platformMu.Unlock()
+
 	if id == platform.DefaultPlatformID {
 		return conflict("cannot delete Default platform")
 	}
 
-	if err := s.Engine.DeletePlatform(id); err != nil {
-		if errors.Is(err, state.ErrNotFound) {
+	var deleteErr error
+	if s.TLSPolicy != nil {
+		deleteErr = s.TLSPolicy.DeletePlatformWithPublication(id, audit, func(publishTLS func()) {
+			s.withPublicationWriteLock(func() {
+				s.Pool.UnregisterPlatform(id)
+				publishTLS()
+			})
+		})
+	} else {
+		deleteErr = s.Engine.DeletePlatform(id)
+	}
+	if deleteErr != nil {
+		if errors.Is(deleteErr, state.ErrNotFound) {
 			return notFound("platform not found")
 		}
-		return internal("delete platform", err)
+		return internal("delete platform", deleteErr)
 	}
-	s.Pool.UnregisterPlatform(id)
+	if s.TLSPolicy == nil {
+		s.withPublicationWriteLock(func() {
+			s.Pool.UnregisterPlatform(id)
+		})
+	}
 	return nil
 }
 
-// ResetPlatformToDefault resets a platform to env defaults.
-func (s *ControlPlaneService) ResetPlatformToDefault(id string) (*PlatformResponse, error) {
-	name, err := s.Engine.GetPlatformName(id)
+// ResetPlatformToDefault resets the complete Platform configuration, including
+// reverse HTTPS verification, to its strict environment defaults.
+func (s *ControlPlaneService) ResetPlatformToDefault(id string, audit tlspolicy.AuditContext) (*PlatformResponse, error) {
+	s.platformMu.Lock()
+	defer s.platformMu.Unlock()
+
+	name, currentConfigVersion, err := s.Engine.GetPlatformIdentity(id)
 	if err != nil {
 		if errors.Is(err, state.ErrNotFound) {
 			return nil, notFound("platform not found")
@@ -553,17 +651,79 @@ func (s *ControlPlaneService) ResetPlatformToDefault(id string) (*PlatformRespon
 	}
 
 	cfg := s.defaultPlatformConfig(name)
-	mp, plat, svcErr := s.compileAndUpsertPlatform(id, cfg)
-	if svcErr != nil {
-		return nil, svcErr
+	if err := validatePlatformConfig(&cfg, true); err != nil {
+		return nil, err
+	}
+	runtimePlatform, compileErr := cfg.toRuntime(id)
+	if compileErr != nil {
+		return nil, invalidArg(compileErr.Error())
+	}
+	if s.Pool != nil {
+		if err := s.Pool.PreparePlatformReplacement(runtimePlatform); err != nil {
+			return nil, conflict("platform runtime cannot be replaced")
+		}
+	}
+	if s.TLSPolicy == nil {
+		mp, plat, svcErr := s.compileAndUpsertPlatform(id, cfg)
+		if svcErr != nil {
+			return nil, svcErr
+		}
+		if s.Pool != nil {
+			if err := s.Pool.ReplacePlatform(plat); err != nil {
+				return nil, internal("replace platform in pool", err)
+			}
+		}
+		response := s.withRoutableNodeCount(platformToResponse(mp))
+		return &response, nil
 	}
 
-	if err := s.Pool.ReplacePlatform(plat); err != nil {
-		return nil, internal("replace platform in pool", err)
+	now := time.Now().UTC()
+	platformRow := cfg.toModel(id, now.UnixNano())
+	expectedPolicyVersion := int64(0)
+	if currentPolicy, policyErr := s.TLSPolicy.Get(id); policyErr == nil {
+		expectedPolicyVersion = currentPolicy.Version
+	} else if !errors.Is(policyErr, tlspolicy.ErrNotFound) {
+		return nil, internal("get platform TLS policy", policyErr)
 	}
-
-	r := s.withRoutableNodeCount(platformToResponse(mp))
-	return &r, nil
+	verify := tlspolicy.Mutation{Mode: tlspolicy.ModeVerify}
+	var configVersion int64
+	_, applyErr := s.TLSPolicy.ApplyConfiguration(
+		id,
+		cfg.Name,
+		&verify,
+		expectedPolicyVersion,
+		audit,
+		func(plan tlspolicy.ConfigurationMutation) error {
+			var persistErr error
+			configVersion, persistErr = s.Engine.ApplyPlatformConfiguration(platformRow, currentConfigVersion, plan)
+			return persistErr
+		},
+		func(publishTLS func()) {
+			s.withPublicationWriteLock(func() {
+				if s.Pool != nil {
+					s.Pool.PublishPreparedPlatform(runtimePlatform)
+				}
+				publishTLS()
+			})
+		},
+	)
+	if applyErr != nil {
+		switch {
+		case errors.Is(applyErr, state.ErrNotFound):
+			return nil, notFound("platform not found")
+		case errors.Is(applyErr, state.ErrConflict), errors.Is(applyErr, tlspolicy.ErrConflict):
+			return nil, conflict("platform configuration version conflict")
+		case errors.Is(applyErr, tlspolicy.ErrIntegrity):
+			return nil, internal("reset platform TLS policy", applyErr)
+		case errors.Is(applyErr, tlspolicy.ErrPersistence):
+			return nil, internal("reset platform TLS policy", applyErr)
+		default:
+			return nil, invalidArg(applyErr.Error())
+		}
+	}
+	platformRow.ConfigVersion = configVersion
+	response := s.withRoutableNodeCount(platformToResponse(platformRow))
+	return &response, nil
 }
 
 // RebuildPlatformView triggers a full rebuild of the platform's routable view.

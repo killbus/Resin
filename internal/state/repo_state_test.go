@@ -200,6 +200,28 @@ func TestPlatformRegexFilterRulesMigrationIsIrreversible(t *testing.T) {
 	}
 }
 
+func TestPlatformTLSPolicyDownMigrationRemovesOnlyTLSState(t *testing.T) {
+	repo := newTestStateRepo(t)
+	if _, err := repo.db.Exec(`INSERT INTO platforms (id, name, sticky_ttl_ns, regex_filters_json, region_filters_json, reverse_proxy_miss_action, reverse_proxy_empty_account_behavior, reverse_proxy_fixed_account_header, allocation_policy, passive_circuit_breaker_disabled, updated_at_ns) VALUES ('keep-platform', 'keep', 1, '[]', '[]', 'TREAT_AS_EMPTY', 'RANDOM', '', 'BALANCED', 0, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	downSQL, err := migrationsFS.ReadFile(stateMigrationsPath + "/000010_platform_tls_policy.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.db.Exec(string(downSQL)); err != nil {
+		t.Fatalf("execute TLS policy down migration: %v", err)
+	}
+	for _, table := range []string{"platform_tls_policy_history", "platform_tls_policies", "ca_bundle_history", "ca_bundles"} {
+		if exists, err := hasTable(repo.db, table); err != nil || exists {
+			t.Fatalf("TLS table %s after down: exists=%v err=%v", table, exists, err)
+		}
+	}
+	if exists, err := hasTable(repo.db, "platforms"); err != nil || !exists {
+		t.Fatalf("platforms after TLS down: exists=%v err=%v", exists, err)
+	}
+}
+
 func TestMigrateStateDB_LegacyBaselineAdvancesToLatest(t *testing.T) {
 	dir := t.TempDir()
 	db, err := OpenDB(dir + "/state.db")

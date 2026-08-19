@@ -23,35 +23,40 @@ type PlatformLookup interface {
 
 // ReverseProxyConfig holds dependencies for the reverse proxy.
 type ReverseProxyConfig struct {
-	ProxyToken        string
-	Router            *routing.Router
-	Pool              outbound.PoolAccessor
-	PlatformLookup    PlatformLookup
-	Health            HealthRecorder
-	Matcher           AccountRuleMatcher
-	Events            EventEmitter
-	MetricsSink       MetricsEventSink
-	OutboundTransport OutboundTransportConfig
-	TransportPool     *OutboundTransportPool
-	ProxyBypassRules  []string
+	ProxyToken         string
+	Router             *routing.Router
+	Pool               outbound.PoolAccessor
+	PlatformLookup     PlatformLookup
+	Health             HealthRecorder
+	Matcher            AccountRuleMatcher
+	Events             EventEmitter
+	MetricsSink        MetricsEventSink
+	OutboundTransport  OutboundTransportConfig
+	TransportPool      *OutboundTransportPool
+	ProxyBypassRules   []string
+	TLSPolicyEvaluator ReverseTLSPolicyEvaluator
+	PublicationGate    *sync.RWMutex
+	RequestResolver    *ReverseRequestResolver
+	FailureAttributor  FailureAttributor
+	HealthFeedback     ReverseHealthFeedback
 }
 
 // ReverseProxy implements an HTTP reverse proxy.
 type ReverseProxy struct {
-	token             string
-	router            *routing.Router
-	pool              outbound.PoolAccessor
-	platLook          PlatformLookup
-	health            HealthRecorder
-	matcher           AccountRuleMatcher
-	events            EventEmitter
-	metricsSink       MetricsEventSink
-	transportConfig   OutboundTransportConfig
-	transportPool     *OutboundTransportPool
-	transportPoolOnce sync.Once
-	directTransport   *http.Transport
-	directOnce        sync.Once
-	bypass            *TargetBypassMatcher
+	token           string
+	router          *routing.Router
+	pool            outbound.PoolAccessor
+	platLook        PlatformLookup
+	health          HealthRecorder
+	matcher         AccountRuleMatcher
+	events          EventEmitter
+	metricsSink     MetricsEventSink
+	transportConfig OutboundTransportConfig
+	transportPool   *OutboundTransportPool
+	bypass          *TargetBypassMatcher
+	resolver        *ReverseRequestResolver
+	attributor      FailureAttributor
+	feedback        ReverseHealthFeedback
 }
 
 // NewReverseProxy creates a new reverse proxy handler.
@@ -65,6 +70,18 @@ func NewReverseProxy(cfg ReverseProxyConfig) *ReverseProxy {
 	if transportPool == nil {
 		transportPool = NewOutboundTransportPool(transportCfg)
 	}
+	attributor := cfg.FailureAttributor
+	if attributor == nil {
+		attributor = defaultFailureAttributor{}
+	}
+	feedback := cfg.HealthFeedback
+	if feedback == nil {
+		feedback = reverseHealthFeedback{health: cfg.Health}
+	}
+	resolver := cfg.RequestResolver
+	if resolver == nil {
+		resolver = NewReverseRequestResolver(cfg.PlatformLookup, cfg.TLSPolicyEvaluator, transportPool.RetireProfile, cfg.PublicationGate)
+	}
 	return &ReverseProxy{
 		token:           cfg.ProxyToken,
 		router:          cfg.Router,
@@ -77,23 +94,10 @@ func NewReverseProxy(cfg ReverseProxyConfig) *ReverseProxy {
 		transportConfig: transportCfg,
 		transportPool:   transportPool,
 		bypass:          NewTargetBypassMatcher(cfg.ProxyBypassRules),
+		resolver:        resolver,
+		attributor:      attributor,
+		feedback:        feedback,
 	}
-}
-
-func (p *ReverseProxy) outboundHTTPTransport(routed routedOutbound) *http.Transport {
-	p.transportPoolOnce.Do(func() {
-		if p.transportPool == nil {
-			p.transportPool = NewOutboundTransportPool(p.transportConfig)
-		}
-	})
-	return p.transportPool.Get(routed.Route.NodeHash, routed.Outbound, p.metricsSink)
-}
-
-func (p *ReverseProxy) directHTTPTransport() *http.Transport {
-	p.directOnce.Do(func() {
-		p.directTransport = newDirectHTTPTransport(p.transportConfig, p.metricsSink)
-	})
-	return p.directTransport
 }
 
 // parsedPath holds the result of parsing a reverse proxy request path.
@@ -270,12 +274,28 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = egressBodyCounter
 	}
 	defer lifecycle.finish()
+	target, targetErr := buildReverseTargetURL(parsed, r.URL.RawQuery)
+	if targetErr != nil {
+		lifecycle.setProxyError(targetErr)
+		lifecycle.setHTTPStatus(targetErr.HTTPCode)
+		writeProxyError(w, targetErr)
+		return
+	}
+	lifecycle.setTarget(parsed.Host, target.String())
+	decision, decisionErr := p.resolver.Resolve(parsed.PlatformName, parsed.Protocol, parsed.Host)
+	lifecycle.setReverseDecision(decision)
+	if decisionErr != nil {
+		lifecycle.setProxyError(decisionErr)
+		lifecycle.setHTTPStatus(decisionErr.HTTPCode)
+		writeProxyError(w, decisionErr)
+		return
+	}
 
 	// Resolve account in three phases:
 	// 1) Use path account directly when present.
 	// 2) If extraction fails, apply miss-action (REJECT or treat-as-empty).
 	// 3) Continue routing with the resulting account (possibly empty).
-	behaviorPlatform := p.resolvePlatformForAccountBehavior(parsed.PlatformName)
+	behaviorPlatform := decision.Platform
 	account, _, extractionFailed := p.resolveReverseProxyAccount(parsed, r, behaviorPlatform)
 	lifecycle.setAccount(account)
 
@@ -286,38 +306,25 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, targetErr := buildReverseTargetURL(parsed, r.URL.RawQuery)
-	if targetErr != nil {
-		lifecycle.setProxyError(targetErr)
-		lifecycle.setHTTPStatus(targetErr.HTTPCode)
-		writeProxyError(w, targetErr)
+	egress, egressErr := p.selectEgress(decision, parsed, account)
+	if egressErr != nil {
+		lifecycle.setProxyError(egressErr)
+		lifecycle.setHTTPStatus(egressErr.HTTPCode)
+		writeProxyError(w, egressErr)
 		return
 	}
-	lifecycle.setTarget(parsed.Host, target.String())
-
-	var route routing.RouteResult
-	var hasRoute bool
-	var transport *http.Transport
-	var nodeHashRaw = route.NodeHash
-	domain := netutil.ExtractDomain(parsed.Host)
-	if p.bypass != nil && p.bypass.ShouldBypass(parsed.Host) {
-		transport = p.directHTTPTransport()
+	var routePtr *routing.RouteResult
+	if egress.hasRoute {
+		lifecycle.setReverseEgressMode("ROUTED")
+		routePtr = &egress.route
+		lifecycle.setRouteResult(egress.route)
 	} else {
-		routed, routeErr := resolveRoutedOutbound(p.router, p.pool, parsed.PlatformName, account, parsed.Host)
-		if routeErr != nil {
-			lifecycle.setProxyError(routeErr)
-			lifecycle.setHTTPStatus(routeErr.HTTPCode)
-			writeProxyError(w, routeErr)
-			return
-		}
-		route = routed.Route
-		hasRoute = true
-		nodeHashRaw = route.NodeHash
-		lifecycle.setRouteResult(route)
-		if p.health != nil {
-			go p.health.RecordLatency(nodeHashRaw, domain, nil)
-		}
-		transport = p.outboundHTTPTransport(routed)
+		lifecycle.setReverseEgressMode("DIRECT")
+	}
+	nodeHashRaw := egress.route.NodeHash
+	domain := netutil.ExtractDomain(parsed.Host)
+	if egress.hasRoute && p.health != nil {
+		go p.health.RecordLatency(nodeHashRaw, domain, nil)
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -332,14 +339,17 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reqCtx := httptrace.WithClientTrace(req.Context(), upstreamTrace.clientTrace())
 
 			// Add httptrace for TLS latency measurement on HTTPS.
-			if parsed.Protocol == "https" && hasRoute && p.health != nil {
+			if parsed.Protocol == "https" && egress.hasRoute && p.health != nil {
 				reporter := newReverseLatencyReporter(p.health, nodeHashRaw, domain)
 				reqCtx = httptrace.WithClientTrace(reqCtx, reporter.clientTrace())
 			}
 			*req = *req.WithContext(reqCtx)
 		},
-		Transport: transport,
+		Transport: egress.transport,
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+			assessment := p.attributor.Assess(err, decision)
+			lifecycle.setFailureAttribution(assessment.Attribution)
+			p.feedback.RecordFailure(routePtr, assessment)
 			proxyErr := classifyUpstreamError(err)
 			if proxyErr == nil {
 				// context.Canceled — no health recording, silently close.
@@ -352,9 +362,6 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lifecycle.setUpstreamError("reverse_roundtrip", err)
 			lifecycle.setNetOK(false)
 			lifecycle.setHTTPStatus(proxyErr.HTTPCode)
-			if hasRoute {
-				recordPassiveResultAsync(p.health, route, false)
-			}
 			writeProxyError(rw, proxyErr)
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -377,9 +384,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					lifecycle.setRespHeadersCaptured(respHeaders, respHeadersLen, respHeadersTruncated)
 				}
 				lifecycle.setNetOK(true)
-				if hasRoute {
-					recordPassiveResultAsync(p.health, route, true)
-				}
+				p.feedback.RecordSuccess(routePtr)
 				return nil
 			}
 			if resp.Body != nil && resp.Body != http.NoBody {
@@ -403,9 +408,7 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// (client abort vs upstream reset vs network blip), and the added
 			// complexity is not worth it for the current phase.
 			lifecycle.setNetOK(true)
-			if hasRoute {
-				recordPassiveResultAsync(p.health, route, true)
-			}
+			p.feedback.RecordSuccess(routePtr)
 			return nil
 		},
 	}

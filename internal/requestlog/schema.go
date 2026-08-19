@@ -5,6 +5,7 @@ package requestlog
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 const requestLogTablesDDL = `
@@ -18,6 +19,16 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	account               TEXT NOT NULL DEFAULT '',
 	target_host           TEXT NOT NULL DEFAULT '',
 	target_url            TEXT NOT NULL DEFAULT '',
+	normalized_target     TEXT NOT NULL DEFAULT '',
+	authorization_decision TEXT NOT NULL DEFAULT '',
+	egress_mode           TEXT NOT NULL DEFAULT '',
+	tls_policy_id          TEXT NOT NULL DEFAULT '',
+	tls_policy_version     INTEGER NOT NULL DEFAULT 0,
+	tls_configured_mode    TEXT NOT NULL DEFAULT '',
+	tls_effective_mode     TEXT NOT NULL DEFAULT '',
+	tls_bundle_fingerprint TEXT NOT NULL DEFAULT '',
+	tls_expired            INTEGER NOT NULL DEFAULT 0,
+	failure_attribution    TEXT NOT NULL DEFAULT '',
 	node_hash             TEXT NOT NULL DEFAULT '',
 	node_tag              TEXT NOT NULL DEFAULT '',
 	egress_ip             TEXT NOT NULL DEFAULT '',
@@ -76,7 +87,28 @@ DROP INDEX IF EXISTS idx_request_logs_platform_id;
 const CreateDDL = requestLogTablesDDL + requestLogIndexesDDL
 
 func ensureRequestLogSchema(db *sql.DB) error {
-	if err := ensureRequestLogColumn(db, "request_logs", "first_byte_duration_ns", "first_byte_duration_ns INTEGER NOT NULL DEFAULT 0"); err != nil {
+	columns := []struct {
+		name string
+		ddl  string
+	}{
+		{"first_byte_duration_ns", "first_byte_duration_ns INTEGER NOT NULL DEFAULT 0"},
+		{"normalized_target", "normalized_target TEXT NOT NULL DEFAULT ''"},
+		{"authorization_decision", "authorization_decision TEXT NOT NULL DEFAULT ''"},
+		{"egress_mode", "egress_mode TEXT NOT NULL DEFAULT ''"},
+		{"tls_policy_id", "tls_policy_id TEXT NOT NULL DEFAULT ''"},
+		{"tls_policy_version", "tls_policy_version INTEGER NOT NULL DEFAULT 0"},
+		{"tls_configured_mode", "tls_configured_mode TEXT NOT NULL DEFAULT ''"},
+		{"tls_effective_mode", "tls_effective_mode TEXT NOT NULL DEFAULT ''"},
+		{"tls_bundle_fingerprint", "tls_bundle_fingerprint TEXT NOT NULL DEFAULT ''"},
+		{"tls_expired", "tls_expired INTEGER NOT NULL DEFAULT 0"},
+		{"failure_attribution", "failure_attribution TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, column := range columns {
+		if err := ensureRequestLogColumn(db, "request_logs", column.name, column.ddl); err != nil {
+			return err
+		}
+	}
+	if err := migrateLegacyTLSPolicyColumns(db); err != nil {
 		return err
 	}
 
@@ -94,6 +126,31 @@ func ensureRequestLogSchema(db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit request log index migration: %w", err)
+	}
+	return nil
+}
+
+func migrateLegacyTLSPolicyColumns(db *sql.DB) error {
+	legacyID, err := hasRequestLogColumn(db, "request_logs", "tls_policy_rule_id")
+	if err != nil {
+		return err
+	}
+	legacyVersion, err := hasRequestLogColumn(db, "request_logs", "tls_policy_rule_version")
+	if err != nil {
+		return err
+	}
+	if !legacyID && !legacyVersion {
+		return nil
+	}
+	assignments := make([]string, 0, 2)
+	if legacyID {
+		assignments = append(assignments, "tls_policy_id = CASE WHEN tls_policy_id = '' THEN tls_policy_rule_id ELSE tls_policy_id END")
+	}
+	if legacyVersion {
+		assignments = append(assignments, "tls_policy_version = CASE WHEN tls_policy_version = 0 THEN tls_policy_rule_version ELSE tls_policy_version END")
+	}
+	if _, err := db.Exec("UPDATE request_logs SET " + strings.Join(assignments, ", ")); err != nil {
+		return fmt.Errorf("migrate legacy TLS policy request-log columns: %w", err)
 	}
 	return nil
 }

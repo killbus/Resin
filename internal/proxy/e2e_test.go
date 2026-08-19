@@ -358,11 +358,15 @@ func TestReverseProxy_E2EHTTPBypassDialsDirect(t *testing.T) {
 
 	host := strings.TrimPrefix(upstream.URL, "http://")
 	path := fmt.Sprintf("/tok/plat:acct/http/%s/api/direct", host)
+	plat := platform.NewPlatform("plat-id", "plat", nil, nil)
 
 	rp := NewReverseProxy(ReverseProxyConfig{
 		ProxyToken:       "tok",
 		Events:           emitter,
 		ProxyBypassRules: []string{"127.*"},
+		PlatformLookup: &mockPlatformLookup{
+			platformNames: map[string]*platform.Platform{"plat": plat},
+		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -398,16 +402,17 @@ func TestReverseProxy_E2EDialTimeout_ZeroEgress(t *testing.T) {
 	})
 
 	rp := NewReverseProxy(ReverseProxyConfig{
-		ProxyToken:     "tok",
-		Router:         env.router,
-		Pool:           env.pool,
-		PlatformLookup: env.pool,
-		Health:         health,
-		Events:         emitter,
+		ProxyToken:         "tok",
+		Router:             env.router,
+		Pool:               env.pool,
+		PlatformLookup:     env.pool,
+		Health:             health,
+		Events:             emitter,
+		TLSPolicyEvaluator: strictVerifyEvaluator{},
 	})
 
 	body := strings.Repeat("b", 256*1024)
-	req := httptest.NewRequest(http.MethodPost, "/tok/plat:acct/http/example.com/upload", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/tok/plat:acct/https/Example.COM/upload", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	w := httptest.NewRecorder()
 
@@ -432,8 +437,17 @@ func TestReverseProxy_E2EDialTimeout_ZeroEgress(t *testing.T) {
 		if logEv.EgressBytes != 0 {
 			t.Fatalf("EgressBytes: got %d, want 0 for dial-timeout before request write", logEv.EgressBytes)
 		}
+		if logEv.NormalizedTarget != "example.com:443" || logEv.AuthorizationDecision != reverseAuthorizationAllowed || logEv.EgressMode != "ROUTED" {
+			t.Fatalf("routed TLS audit = %+v", logEv)
+		}
+		if logEv.FailureAttribution != string(FailureUnknown) {
+			t.Fatalf("routed dial attribution = %q", logEv.FailureAttribution)
+		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected reverse log event")
+	}
+	if health.resultCalls.Load() != 0 {
+		t.Fatalf("opaque routed dial failure recorded %d node health updates", health.resultCalls.Load())
 	}
 }
 
