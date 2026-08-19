@@ -1,5 +1,13 @@
 # Round-two convergence review
 
+> **Partially superseded review (2026-08-19):** The architecture-boundary
+> findings remain useful history, but the exact-target and target-exclusive CA
+> conclusions in this review were withdrawn. The final design uses one optional
+> platform-wide TLS policy per custom Platform, and custom CA trust augments the
+> system roots. See [`assumption-correction.md`](./assumption-correction.md),
+> [`../prd.md`](../prd.md), and [`../design.md`](../design.md) for the
+> authoritative contract.
+
 Status: **design target and architecture boundaries converged; two
 implementation contracts remain open**.
 
