@@ -1,0 +1,31 @@
+{
+  "id": "reverse-redirect-policy",
+  "name": "reverse-redirect-policy",
+  "title": "Reverse proxy upstream redirect handling policy",
+  "description": "TEAM B implementation contract for per-platform PASS_THROUGH and same-origin REWRITE reverse redirect handling.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "killbus",
+  "assignee": "killbus",
+  "createdAt": "2026-10-01",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    ".trellis/tasks/10-01-reverse-redirect-policy/prd.md",
+    ".trellis/tasks/10-01-reverse-redirect-policy/design.md",
+    ".trellis/tasks/10-01-reverse-redirect-policy/implement.md",
+    ".trellis/tasks/10-01-reverse-redirect-policy/research/implementation-map.md"
+  ],
+  "notes": "Planning package prepared for TEAM B. Application implementation and runtime verification remain pending; audit.md describes the earlier pre-implementation snapshot.",
+  "meta": {}
+}
