@@ -55,6 +55,22 @@ func tlsTestPlatform(id, name string) model.Platform {
 	}
 }
 
+// newMonotonicTestClock returns a clock with strictly increasing nanosecond
+// stamps. Coarse clocks can stamp history events with identical timestamps,
+// leaving order to the random event IDs; the monotonic clock keeps ordering
+// assertions deterministic.
+func newMonotonicTestClock() func() time.Time {
+	base := time.Now().UTC()
+	var mu sync.Mutex
+	var seq int64
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		seq++
+		return base.Add(time.Duration(seq) * time.Nanosecond)
+	}
+}
+
 func TestTLSPolicyHistorySurvivesRenamePlatformDeletionAndBundleDeletion(t *testing.T) {
 	engine, _, _ := newTestEngine(t)
 	platformID := uuid.NewString()
@@ -62,8 +78,9 @@ func TestTLSPolicyHistorySurvivesRenamePlatformDeletionAndBundleDeletion(t *test
 	if err := engine.UpsertPlatform(platformModel); err != nil {
 		t.Fatal(err)
 	}
-	registry := tlspolicy.NewCABundleRegistry(engine, time.Now)
-	policy, err := tlspolicy.NewPolicyService(engine, registry, time.Now)
+	monotonicClock := newMonotonicTestClock()
+	registry := tlspolicy.NewCABundleRegistry(engine, monotonicClock)
+	policy, err := tlspolicy.NewPolicyService(engine, registry, monotonicClock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,18 +277,7 @@ func TestCABundleHistoryMetadataSurvivesDeletionAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Coarse clocks can stamp the CREATE and DELETE events with an identical
-	// timestamp, leaving history order to the random event IDs. Use a
-	// strictly monotonic clock so history ordering assertions are deterministic.
-	base := time.Now().UTC()
-	var clockMu sync.Mutex
-	var clockSeq int64
-	monotonicClock := func() time.Time {
-		clockMu.Lock()
-		defer clockMu.Unlock()
-		clockSeq++
-		return base.Add(time.Duration(clockSeq) * time.Nanosecond)
-	}
+	monotonicClock := newMonotonicTestClock()
 	registry1 := tlspolicy.NewCABundleRegistry(engine1, monotonicClock)
 	bundle, _, err := registry1.Import(stateTestCAPEM(t), tlspolicy.AuditContext{
 		RequestID: "create", RemoteAddress: "192.0.2.30:3000", CredentialClass: "SHARED_ADMIN_TOKEN",
@@ -499,18 +505,7 @@ func TestCABundleDeleteRacesPolicyBindWithoutDanglingReference(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	// Coarse clocks can stamp the CREATE and DELETE events with an identical
-	// timestamp, leaving history order to the random event IDs. Use a
-	// strictly monotonic clock so history ordering assertions are deterministic.
-		base := time.Now().UTC()
-		var clockMu sync.Mutex
-		var clockSeq int64
-		monotonicClock := func() time.Time {
-			clockMu.Lock()
-			defer clockMu.Unlock()
-			clockSeq++
-			return base.Add(time.Duration(clockSeq) * time.Nanosecond)
-		}
+		monotonicClock := newMonotonicTestClock()
 		registry = tlspolicy.NewCABundleRegistry(engine, monotonicClock)
 		policy, err = tlspolicy.NewPolicyService(engine, registry, monotonicClock)
 		if err != nil {
