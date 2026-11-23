@@ -194,13 +194,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if Pre-release
-        id: check_prerelease
+      - name: Check if latest-eligible
+        id: check_latest
         run: |
-          if [[ "${GITHUB_REF_NAME}" == *"-"* ]]; then
-            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          if [[ "${GITHUB_REF_NAME}" == *"-fork."* ]]; then
+            echo "update_latest=true" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == *"-"* ]]; then
+            echo "update_latest=false" >> $GITHUB_OUTPUT
           else
-            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "update_latest=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Extract metadata
@@ -211,7 +213,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ steps.check_prerelease.outputs.is_prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ steps.check_latest.outputs.update_latest == 'true' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
